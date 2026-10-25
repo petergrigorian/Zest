@@ -25,7 +25,7 @@ Zest is an experimental native macOS utility built around a compact, configurabl
 4. Launch **Zest** from `/Applications`.
 5. Complete the onboarding flow and grant the requested permissions.
 
-Release builds are signed with a **Developer ID** certificate and notarized by Apple for distribution outside the Mac App Store.
+Note! Your Mac computer needs to have at least macOS 27 installed to run this software!
 
 ## Permissions
 
