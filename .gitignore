@@ -24,3 +24,10 @@ Package.resolved
 
 # Logs
 *.log
+
+# Zest local release output
+Final builds/
+*.pkg
+*.xcarchive
+*.dSYM
+DerivedData/

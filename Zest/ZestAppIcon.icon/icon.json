@@ -1,0 +1,148 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:1.00000,0.97756,0.88566,1.00000",
+      "display-p3:0.96783,0.79733,0.72152,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "07_center_button.svg",
+          "name" : "07_center_button",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "08_center_ring.svg",
+          "name" : "08_center_ring",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "06_wedge.svg",
+          "name" : "06_wedge",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "05_wedge.svg",
+          "name" : "05_wedge",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "04_wedge.svg",
+          "name" : "04_wedge",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "03_wedge.svg",
+          "name" : "03_wedge",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "02_wedge.svg",
+          "name" : "02_wedge",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "01_wedge.svg",
+          "name" : "01_wedge",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "Zest_Orange_Slice_Combined.svg",
+          "name" : "Zest_Orange_Slice_Combined",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "00_rind.svg",
+          "name" : "00_rind",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -10.417444782161624,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
