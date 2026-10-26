@@ -109,6 +109,7 @@ struct ZestMenuBarPanel: View {
     @ObservedObject var clipboardManager: ClipboardHistoryManager
     @ObservedObject var emojiLibraryManager: EmojiLibraryManager
     @ObservedObject var symbolLibraryManager: SymbolLibraryManager
+    let onShowZest: () -> Void
     @State private var selectedFeature: ZestFeature?
     @State private var hasAppeared = false
     @Environment(\.openWindow) private var openWindow
@@ -128,6 +129,19 @@ struct ZestMenuBarPanel: View {
                     Text("System dashboard").font(.system(size: 10.5, weight: .medium)).foregroundStyle(.secondary)
                 }
                 Spacer()
+
+                Button {
+                    toggleShowZestTile()
+                } label: {
+                    Image(systemName: hasShowZestTile ? "minus.circle" : "plus.circle")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help(hasShowZestTile ? "Remove Show Zest tile" : "Add Show Zest tile")
             }
 
             ForEach(Array(settingsManager.menuBarBlocks.enumerated()), id: \.element.id) { index, block in
@@ -146,7 +160,15 @@ struct ZestMenuBarPanel: View {
                         ForEach(Array(settingsManager.menuBarPinnedFeatures.enumerated()), id: \.offset) { featureIndex, feature in
                             VStack(spacing: 5) {
                                 Button {
-                                    selectedFeature = (selectedFeature == feature) ? nil : feature
+                                    if feature == .settings {
+                                        selectedFeature = nil
+                                        dismiss()
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                                            onShowZest()
+                                        }
+                                    } else {
+                                        selectedFeature = (selectedFeature == feature) ? nil : feature
+                                    }
                                 } label: {
                                     ZestMenuFeatureTile(feature: feature, palette: palette, accent: settingsManager.accentColor(at: featureIndex))
                                 }
@@ -174,13 +196,13 @@ struct ZestMenuBarPanel: View {
                                     )
                                 }
 
-                                Text(feature.title)
+                                Text(menuFeatureTitle(feature))
                                     .font(.system(size: 9.5, weight: .medium))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
                             }
                             .frame(width: 57)
-                            .help(feature.title)
+                            .help(menuFeatureTitle(feature))
                         }
                     }
                 }
@@ -228,6 +250,34 @@ struct ZestMenuBarPanel: View {
             hasAppeared = false
             withAnimation(.easeOut(duration: 0.20)) { hasAppeared = true }
         }
+    }
+
+    private var hasShowZestTile: Bool {
+        settingsManager.menuBarPinnedFeatures.contains(.settings)
+    }
+
+    private func menuFeatureTitle(_ feature: ZestFeature) -> String {
+        feature == .settings ? "Show Zest" : feature.title
+    }
+
+    private func toggleShowZestTile() {
+        var features = settingsManager.menuBarPinnedFeatures
+
+        if let index = features.firstIndex(of: .settings) {
+            let replacements: [ZestFeature] = [
+                .symbols, .emoji, .clipboard, .font, .size, .openShortcut, .runShortcut
+            ]
+            if let replacement = replacements.first(where: { !features.contains($0) }) {
+                features[index] = replacement
+            }
+        } else if features.count < 5 {
+            features.append(.settings)
+        } else if !features.isEmpty {
+            features[features.count - 1] = .settings
+        }
+
+        settingsManager.menuBarPinnedFeatures = Array(features.prefix(5))
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
     }
 
     private func bugReport() {
@@ -395,25 +445,32 @@ struct ZestMenuFeatureTile: View {
     let accent: Color
 
     var body: some View {
-        Image(systemName: feature == .font ? "bold.italic.underline" : feature.systemImage)
-            .font(.system(size: 19, weight: .semibold))
-            .symbolRenderingMode(.monochrome)
-            .foregroundStyle(Color.primary.opacity(0.88))
-            .frame(width: 57, height: 57)
-            .background {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(accent.opacity(0.12))
-                    .glassEffect(
-                        .regular.tint(accent.opacity(0.18)),
-                        in: RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    )
+        Group {
+            if feature == .settings {
+                ZestMenuBarGlyph(color: Color.primary.opacity(0.88))
+                    .frame(width: 22, height: 22)
+            } else {
+                Image(systemName: feature == .font ? "bold.italic.underline" : feature.systemImage)
+                    .font(.system(size: 19, weight: .semibold))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(Color.primary.opacity(0.88))
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .stroke(Color.white.opacity(0.32), lineWidth: 0.7)
-            }
-            .shadow(color: .black.opacity(0.08), radius: 3, y: 2)
-            .contentShape(Rectangle())
+        }
+        .frame(width: 57, height: 57)
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(accent.opacity(0.12))
+                .glassEffect(
+                    .regular.tint(accent.opacity(0.18)),
+                    in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.white.opacity(0.32), lineWidth: 0.7)
+        }
+        .shadow(color: .black.opacity(0.08), radius: 3, y: 2)
+        .contentShape(Rectangle())
     }
 }
 
@@ -519,7 +576,7 @@ struct ZestMenuBarSettingsPreview: View {
                             .dropDestination(for: String.self) { items, _ in
                                 guard let raw = items.first, raw.hasPrefix("menufeature:"),
                                       let dropped = ZestFeature(rawValue: String(raw.dropFirst("menufeature:".count))),
-                                      dropped != .empty, dropped != .settings else { return false }
+                                      dropped != .empty else { return false }
                                 withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
                                     if let existing = pinnedFeatures.firstIndex(of: dropped) {
                                         pinnedFeatures.swapAt(existing, featureIndex)
@@ -530,7 +587,7 @@ struct ZestMenuBarSettingsPreview: View {
                                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                                 return true
                             }
-                        Text(feature.title)
+                        Text(feature == .settings ? "Show Zest" : feature.title)
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -645,10 +702,16 @@ final class ZestMenuBarController: NSObject, NSPopoverDelegate {
     private lazy var symbolLibraryManager = SymbolLibraryManager()
     private let textContextManager: TextContextManager
     private let fontLibraryManager: FontLibraryManager
+    private let onShowZest: () -> Void
 
-    init(textContextManager: TextContextManager, fontLibraryManager: FontLibraryManager) {
+    init(
+        textContextManager: TextContextManager,
+        fontLibraryManager: FontLibraryManager,
+        onShowZest: @escaping () -> Void
+    ) {
         self.textContextManager = textContextManager
         self.fontLibraryManager = fontLibraryManager
+        self.onShowZest = onShowZest
         super.init()
     }
 
@@ -736,7 +799,9 @@ final class ZestMenuBarController: NSObject, NSPopoverDelegate {
         if let button = item.button {
             button.target = self
             button.action = #selector(toggleDashboard(_:))
-            button.sendAction(on: [.leftMouseUp])
+            // Open on mouse-down so the corresponding mouse-up cannot be
+            // interpreted as an outside click by a transient popover.
+            button.sendAction(on: [.leftMouseDown])
             button.toolTip = "Zest"
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
@@ -818,12 +883,15 @@ final class ZestMenuBarController: NSObject, NSPopoverDelegate {
                 fontLibraryManager: fontLibraryManager,
                 clipboardManager: clipboardManager,
                 emojiLibraryManager: emojiLibraryManager,
-                symbolLibraryManager: symbolLibraryManager
+                symbolLibraryManager: symbolLibraryManager,
+                onShowZest: onShowZest
             )
         )
 
         let dashboard = NSPopover()
-        dashboard.behavior = .transient
+        // A semitransient popover survives the status-item click that created it
+        // while still dismissing naturally when the user moves on.
+        dashboard.behavior = .semitransient
         dashboard.animates = false
         let blockHeight: CGFloat = settings.menuBarBlocks.reduce(0) { partial, block in
             partial + (block == .monitors ? 86 : 83)
@@ -834,11 +902,28 @@ final class ZestMenuBarController: NSObject, NSPopoverDelegate {
         dashboard.delegate = self
         popover = dashboard
 
+        print("🍊 MENU BAR → dashboard requested")
         dashboard.show(
             relativeTo: button.bounds,
             of: button,
             preferredEdge: .minY
         )
+
+        // Signed standalone builds can create the popover successfully without
+        // immediately ordering its private window above the current app. Promote
+        // that window explicitly without activating Zest or stealing editor focus.
+        DispatchQueue.main.async { [weak dashboard] in
+            guard let dashboard, dashboard.isShown,
+                  let window = dashboard.contentViewController?.view.window else { return }
+
+            var behavior = window.collectionBehavior
+            behavior.insert(.canJoinAllSpaces)
+            behavior.insert(.fullScreenAuxiliary)
+            window.collectionBehavior = behavior
+            window.level = .statusBar
+            window.orderFrontRegardless()
+            print("🍊 MENU BAR → dashboard visible:", dashboard.isShown)
+        }
     }
 
     private func closeDashboardAnimated(_ sender: Any? = nil) {

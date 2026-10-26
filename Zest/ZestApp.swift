@@ -8,6 +8,58 @@ import AppKit
 import Carbon
 
 
+// MARK: - Native Global Hot Keys
+
+private extension Notification.Name {
+    static let zestCarbonShowZest = Notification.Name("zest.hotkey.showZest")
+    static let zestCarbonPreviousInput = Notification.Name("zest.hotkey.previousInput")
+    static let zestCarbonNextInput = Notification.Name("zest.hotkey.nextInput")
+}
+
+private enum ZestRegisteredHotKeyID: UInt32 {
+    case showZest = 1
+    case previousInputSource = 2
+    case nextInputSource = 3
+}
+
+private let zestHotKeySignature: OSType = 0x5A455354 // 'ZEST'
+
+// Carbon invokes this callback from the application event loop. Keep it free of
+// app state and bounce back onto the main queue through notifications.
+private let zestCarbonHotKeyHandler: EventHandlerUPP = { _, event, _ in
+    guard let event else { return OSStatus(eventNotHandledErr) }
+
+    var hotKeyID = EventHotKeyID(signature: 0, id: 0)
+    let status = GetEventParameter(
+        event,
+        EventParamName(kEventParamDirectObject),
+        EventParamType(typeEventHotKeyID),
+        nil,
+        MemoryLayout<EventHotKeyID>.size,
+        nil,
+        &hotKeyID
+    )
+    guard status == noErr else { return status }
+
+    let name: Notification.Name
+    switch hotKeyID.id {
+    case ZestRegisteredHotKeyID.showZest.rawValue:
+        name = .zestCarbonShowZest
+    case ZestRegisteredHotKeyID.previousInputSource.rawValue:
+        name = .zestCarbonPreviousInput
+    case ZestRegisteredHotKeyID.nextInputSource.rawValue:
+        name = .zestCarbonNextInput
+    default:
+        return OSStatus(eventNotHandledErr)
+    }
+
+    DispatchQueue.main.async {
+        NotificationCenter.default.post(name: name, object: nil)
+    }
+    return noErr
+}
+
+
 // MARK: - App Delegate
 
 @MainActor
@@ -21,8 +73,11 @@ final class ZestAppDelegate:
     let fontLibraryManager =
         FontLibraryManager()
 
-    private var globalKeyboardMonitor: Any?
-    private var localKeyboardMonitor: Any?
+    private var hotKeyEventHandler: EventHandlerRef?
+    private var showZestHotKey: EventHotKeyRef?
+    private var previousInputHotKey: EventHotKeyRef?
+    private var nextInputHotKey: EventHotKeyRef?
+    private var hotKeyObservers: [NSObjectProtocol] = []
     private let saturnHUD = ZestSaturnHUDController()
     private let rapidInputSourceManager = InputSourceManager()
     private var menuBarController: ZestMenuBarController?
@@ -56,21 +111,24 @@ final class ZestAppDelegate:
             .regular
         )
 
-        // AppKit owns the status item directly. This is intentionally separate
-        // from SwiftUI SceneBuilder/MenuBarExtra so Zest can guarantee a
-        // persistent, explicitly controllable menu-bar presence.
-        let menuController = ZestMenuBarController(
-            textContextManager: textContextManager,
-            fontLibraryManager: fontLibraryManager
-        )
-        menuController.start()
-        menuBarController = menuController
-
         keyboardAssistantController = ZestKeyboardAssistantController(
             textContextManager: textContextManager,
             fontLibraryManager: fontLibraryManager,
             settingsManager: settingsManager
         )
+
+        // AppKit owns the status item directly. Give the dashboard a direct,
+        // permission-independent route into the same runtime assistant so the
+        // optional Show Zest tile doubles as a release-debugging escape hatch.
+        let menuController = ZestMenuBarController(
+            textContextManager: textContextManager,
+            fontLibraryManager: fontLibraryManager,
+            onShowZest: { [weak self] in
+                self?.keyboardAssistantController?.showBesideCurrentCaret()
+            }
+        )
+        menuController.start()
+        menuBarController = menuController
 
         let onboarding = ZestOnboardingWindowController(settingsManager: settingsManager)
         onboardingWindowController = onboarding
@@ -85,7 +143,10 @@ final class ZestAppDelegate:
         textContextManager
             .requestAccessibilityPermission()
 
+        installHotKeyObservers()
         refreshShortcutCache()
+        installCarbonHotKeys()
+
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: UserDefaults.standard,
@@ -93,10 +154,9 @@ final class ZestAppDelegate:
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.refreshShortcutCache()
+                self?.registerConfiguredHotKeys()
             }
         }
-
-        installTestShortcut()
 
         print("")
         print("==========================================")
@@ -149,20 +209,53 @@ final class ZestAppDelegate:
         }
     }
 
-    // MARK: - Temporary Probe Shortcut
+    // MARK: - Native Global Shortcuts
 
-    private func installTestShortcut() {
-        // Global monitors do NOT receive key events while Zest itself is the
-        // active app. A matching local monitor is therefore required for the
-        // development window and, later, for any active Zest UI.
-        globalKeyboardMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleShortcutEvent(event)
+    private func installHotKeyObservers() {
+        let center = NotificationCenter.default
+
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestCarbonShowZest, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.keyboardAssistantController?.toggle() }
+            }
+        )
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestCarbonPreviousInput, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.performRapidInputSwitch(direction: -1) }
+            }
+        )
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestCarbonNextInput, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.performRapidInputSwitch(direction: 1) }
+            }
+        )
+    }
+
+    private func installCarbonHotKeys() {
+        guard hotKeyEventHandler == nil else {
+            registerConfiguredHotKeys()
+            return
         }
 
-        localKeyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            let handled = self?.handleShortcutEvent(event) ?? false
-            return handled ? nil : event
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            zestCarbonHotKeyHandler,
+            1,
+            &eventType,
+            nil,
+            &hotKeyEventHandler
+        )
+
+        guard status == noErr else {
+            print("🍊 HOTKEY ERROR → could not install Carbon handler:", status)
+            return
         }
+
+        registerConfiguredHotKeys()
     }
 
     private func refreshShortcutCache() {
@@ -177,61 +270,95 @@ final class ZestAppDelegate:
             defaults.object(forKey: "zest.settings.rapidInputSourceSwitching") == nil
             ? true
             : defaults.bool(forKey: "zest.settings.rapidInputSourceSwitching")
+
         cachedPreviousShortcut = decoded("zest.settings.saturnPreviousShortcut")
+            ?? ZestKeyboardShortcut(keyCode: 123, command: false, option: true, control: true, shift: false)
         cachedNextShortcut = decoded("zest.settings.saturnNextShortcut")
+            ?? ZestKeyboardShortcut(keyCode: 124, command: false, option: true, control: true, shift: false)
         cachedShowZestShortcut = decoded("zest.settings.showZestShortcut") ?? .defaultShowZest
     }
 
-    @discardableResult
-    private func handleShortcutEvent(_ event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    private func registerConfiguredHotKeys() {
+        guard hotKeyEventHandler != nil else { return }
+        unregisterHotKeys()
 
-        func matches(_ shortcut: ZestKeyboardShortcut?) -> Bool {
-            guard let shortcut else { return false }
-            return event.keyCode == shortcut.keyCode
-                && modifiers.contains(.command) == shortcut.command
-                && modifiers.contains(.option) == shortcut.option
-                && modifiers.contains(.control) == shortcut.control
-                && modifiers.contains(.shift) == shortcut.shift
-        }
+        showZestHotKey = registerHotKey(cachedShowZestShortcut, id: .showZest)
 
         if cachedRapidSwitchingEnabled {
-            if matches(cachedPreviousShortcut) {
-                Task { @MainActor in
-                    self.rapidInputSourceManager.selectPrevious()
-                    try? await Task.sleep(for: .milliseconds(90))
-                    self.rapidInputSourceManager.refresh()
-                    NotificationCenter.default.post(name: .zestSaturnPrevious, object: nil)
-                    if !NSApp.isActive {
-                        try? await Task.sleep(for: .milliseconds(70))
-                        self.saturnHUD.show(direction: -1)
-                    }
-                }
-                return true
+            if let shortcut = cachedPreviousShortcut {
+                previousInputHotKey = registerHotKey(shortcut, id: .previousInputSource)
             }
-            if matches(cachedNextShortcut) {
-                Task { @MainActor in
-                    self.rapidInputSourceManager.selectNext()
-                    try? await Task.sleep(for: .milliseconds(90))
-                    self.rapidInputSourceManager.refresh()
-                    NotificationCenter.default.post(name: .zestSaturnNext, object: nil)
-                    if !NSApp.isActive {
-                        try? await Task.sleep(for: .milliseconds(70))
-                        self.saturnHUD.show(direction: 1)
-                    }
-                }
-                return true
+            if let shortcut = cachedNextShortcut {
+                nextInputHotKey = registerHotKey(shortcut, id: .nextInputSource)
             }
         }
+    }
 
-        if matches(cachedShowZestShortcut) {
-            Task { @MainActor in
-                self.keyboardAssistantController?.toggle()
-            }
-            return true
+    private func registerHotKey(
+        _ shortcut: ZestKeyboardShortcut,
+        id: ZestRegisteredHotKeyID
+    ) -> EventHotKeyRef? {
+        var reference: EventHotKeyRef?
+        let identifier = EventHotKeyID(signature: zestHotKeySignature, id: id.rawValue)
+        let status = RegisterEventHotKey(
+            UInt32(shortcut.keyCode),
+            carbonModifiers(for: shortcut),
+            identifier,
+            GetApplicationEventTarget(),
+            0,
+            &reference
+        )
+
+        if status != noErr {
+            print("🍊 HOTKEY ERROR → \(shortcut.displayString) failed with status", status)
+            return nil
         }
 
-        return false
+        print("🍊 HOTKEY REGISTERED →", shortcut.displayString)
+        return reference
+    }
+
+    private func carbonModifiers(for shortcut: ZestKeyboardShortcut) -> UInt32 {
+        var modifiers: UInt32 = 0
+        if shortcut.command { modifiers |= UInt32(cmdKey) }
+        if shortcut.option { modifiers |= UInt32(optionKey) }
+        if shortcut.control { modifiers |= UInt32(controlKey) }
+        if shortcut.shift { modifiers |= UInt32(shiftKey) }
+        return modifiers
+    }
+
+    private func unregisterHotKeys() {
+        if let showZestHotKey { UnregisterEventHotKey(showZestHotKey) }
+        if let previousInputHotKey { UnregisterEventHotKey(previousInputHotKey) }
+        if let nextInputHotKey { UnregisterEventHotKey(nextInputHotKey) }
+        showZestHotKey = nil
+        previousInputHotKey = nil
+        nextInputHotKey = nil
+    }
+
+    private func performRapidInputSwitch(direction: Int) {
+        guard cachedRapidSwitchingEnabled else { return }
+        let shouldShowHUD = !NSApp.isActive
+
+        Task { @MainActor in
+            if direction < 0 {
+                rapidInputSourceManager.selectPrevious()
+            } else {
+                rapidInputSourceManager.selectNext()
+            }
+
+            try? await Task.sleep(for: .milliseconds(90))
+            rapidInputSourceManager.refresh()
+            NotificationCenter.default.post(
+                name: direction < 0 ? .zestSaturnPrevious : .zestSaturnNext,
+                object: nil
+            )
+
+            if shouldShowHUD {
+                try? await Task.sleep(for: .milliseconds(70))
+                saturnHUD.show(direction: direction < 0 ? -1 : 1)
+            }
+        }
     }
 
 
@@ -242,16 +369,17 @@ final class ZestAppDelegate:
             Notification
     ) {
 
-        if let globalKeyboardMonitor {
+        unregisterHotKeys()
 
-            NSEvent.removeMonitor(
-                globalKeyboardMonitor
-            )
+        if let hotKeyEventHandler {
+            RemoveEventHandler(hotKeyEventHandler)
+            self.hotKeyEventHandler = nil
         }
 
-        if let localKeyboardMonitor {
-            NSEvent.removeMonitor(localKeyboardMonitor)
+        for observer in hotKeyObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
+        hotKeyObservers.removeAll()
 
         if let defaultsObserver {
             NotificationCenter.default.removeObserver(defaultsObserver)

@@ -1636,7 +1636,7 @@ struct ZestSettingsView: View {
                                     alignment: .leading,
                                     spacing: 10
                                 ) {
-                                    ForEach(ZestFeature.allCases.filter { $0 != .empty && $0 != .settings }) { feature in
+                                    ForEach(ZestFeature.allCases.filter { $0 != .empty }) { feature in
                                         menuBarFeaturePalettePiece(feature)
                                     }
                                 }
@@ -1719,7 +1719,7 @@ struct ZestSettingsView: View {
                         ZestMenuFeatureTile(feature: feature, palette: settingsManager.accent.palette, accent: settingsManager.accentColor(at: index))
                             .scaleEffect(0.66)
                             .frame(width: 38, height: 38)
-                        Text(feature.title).font(.system(size: 7, weight: .medium)).lineLimit(1)
+                        Text(feature == .settings ? "Show Zest" : feature.title).font(.system(size: 7, weight: .medium)).lineLimit(1)
                     }
                     .frame(width: 45)
                 }
@@ -1756,7 +1756,7 @@ struct ZestSettingsView: View {
             ZestMenuFeatureTile(feature: feature, palette: settingsManager.accent.palette, accent: accentColor)
                 .scaleEffect(0.66)
                 .frame(width: 38, height: 38)
-            Text(feature.title)
+            Text(feature == .settings ? "Show Zest" : feature.title)
                 .font(.system(size: 7, weight: .semibold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)

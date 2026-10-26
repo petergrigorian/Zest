@@ -166,6 +166,34 @@ final class ZestTextInserter: ObservableObject {
     }
 
 
+    // MARK: Paste-Only Public Route
+
+    /// Uses the temporary-pasteboard + Command-V path directly.
+    /// Emoji and Symbol tiles use this route because some AX text controls
+    /// duplicate single Unicode graphemes when kAXSelectedTextAttribute is set.
+    func insertUsingPasteboard(
+        _ text: String
+    ) {
+        guard !text.isEmpty else {
+            return
+        }
+
+        guard let application =
+            resolvedTargetApplication()
+        else {
+            print(
+                "🍊 INSERT PASTE-ONLY → no target application"
+            )
+            return
+        }
+
+        insertViaPaste(
+            text,
+            into: application
+        )
+    }
+
+
     // MARK: Target Capture
 
     private func installWorkspaceObservers() {

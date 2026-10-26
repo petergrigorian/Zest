@@ -916,7 +916,7 @@ struct ZestSymbolPanel: View {
 
 
         textInserter?
-            .insert(
+            .insertUsingPasteboard(
                 symbol.character
             )
     }

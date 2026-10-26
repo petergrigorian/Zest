@@ -918,7 +918,7 @@ private func choose(
 
 
     textInserter?
-        .insert(
+        .insertUsingPasteboard(
             emoji.character
         )
 }
