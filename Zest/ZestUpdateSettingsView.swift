@@ -53,7 +53,7 @@ struct ZestUpdateSettingsView: View {
 
     private var updateCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
                 ZStack {
                     RoundedRectangle(
                         cornerRadius: 13,
@@ -236,11 +236,19 @@ struct ZestUpdateSettingsView: View {
     private var primaryAction: some View {
         switch updateManager.phase {
         case .idle, .upToDate, .failed:
-            Button("Check for Updates") {
+            Button {
                 updateManager.checkForUpdates()
+            } label: {
+                Label(
+                    "Check for Updates",
+                    systemImage: "arrow.clockwise"
+                )
             }
-            .buttonStyle(.borderedProminent)
-            .tint(accentColor)
+            .buttonStyle(
+                ZestSoftwareUpdatePrimaryButtonStyle(
+                    accent: accentColor
+                )
+            )
             .disabled(!updateManager.canCheckForUpdates)
 
         case .checking:
@@ -410,5 +418,77 @@ struct ZestUpdateSettingsView: View {
             .replacingOccurrences(of: "&gt;", with: ">")
             .replacingOccurrences(of: "&quot;", with: "\"")
             .replacingOccurrences(of: "&#39;", with: "'")
+    }
+    
+    private struct ZestSoftwareUpdatePrimaryButtonStyle:
+        ButtonStyle {
+
+        let accent: Color
+
+        func makeBody(
+            configuration: Configuration
+        ) -> some View {
+
+            configuration.label
+                .font(
+                    .system(
+                        size: 12,
+                        weight: .bold,
+                        design: .rounded
+                    )
+                )
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .frame(height: 38)
+                .background {
+                    Capsule()
+                        .fill(
+                            accent.opacity(
+                                configuration.isPressed ? 0.68 : 0.86
+                            )
+                        )
+                        .glassEffect(
+                            .regular.tint(
+                                accent.opacity(
+                                    configuration.isPressed ? 0.20 : 0.30
+                                )
+                            ),
+                            in: Capsule()
+                        )
+                        .overlay {
+                            Capsule()
+                                .stroke(
+                                    Color.white.opacity(
+                                        configuration.isPressed ? 0.22 : 0.40
+                                    ),
+                                    lineWidth: 0.8
+                                )
+                        }
+                        .shadow(
+                            color: accent.opacity(
+                                configuration.isPressed ? 0.14 : 0.32
+                            ),
+                            radius: configuration.isPressed ? 6 : 12,
+                            y: 3
+                        )
+                        .shadow(
+                            color: Color.black.opacity(
+                                configuration.isPressed ? 0.07 : 0.13
+                            ),
+                            radius: 6,
+                            y: 3
+                        )
+                }
+                .scaleEffect(
+                    configuration.isPressed ? 0.97 : 1
+                )
+                .animation(
+                    .spring(
+                        response: 0.18,
+                        dampingFraction: 0.82
+                    ),
+                    value: configuration.isPressed
+                )
+        }
     }
 }

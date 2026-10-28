@@ -31,6 +31,7 @@ private enum ZestSettingsSection:
     case menuBar
     case shortcuts
     case permissions
+    case softwareUpdate
     case reset
     case about
 
@@ -55,6 +56,9 @@ private enum ZestSettingsSection:
 
         case .permissions:
             return "Permissions & Startup"
+            
+        case .softwareUpdate:
+            return "Software Update"
 
         case .reset:
             return "Reset"
@@ -80,6 +84,9 @@ private enum ZestSettingsSection:
 
         case .permissions:
             return "checkmark.shield"
+            
+        case .softwareUpdate:
+            return "arrow.triangle.2.circlepath"
 
         case .reset:
             return "arrow.counterclockwise"
@@ -1494,6 +1501,11 @@ struct ZestSettingsView: View {
 
                 case .permissions:
                     permissionsSection
+                    
+                case .softwareUpdate:
+                    ZestUpdateSettingsView(
+                        accentColor: accentColor
+                    )
 
                 case .reset:
                     resetSection
