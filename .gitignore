@@ -31,3 +31,6 @@ Final builds/
 *.xcarchive
 *.dSYM
 DerivedData/
+
+# Local Sparkle release artifacts
+Sparkle Updates/
