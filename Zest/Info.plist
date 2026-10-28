@@ -9,7 +9,7 @@
 	<key>SUFeedURL</key>
 	<string>https://raw.githubusercontent.com/petergrigorian/Zest/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>VJG0+KtGHWthpGqOLMEmjwKJ8xEumVo8Vu/Zx+F8Zjc=</string>
+	<string>VJGO+KtGHWthpGqOLMEmjwKJ8xEumVo8Vu/Zx+F8Zjc=</string>
 	<key>SUShowReleaseNotes</key>
 	<false/>
 </dict>
