@@ -264,11 +264,22 @@ struct ZestSettingsView: View {
     var layoutOnly: Bool = false
     var onboardingLayoutMode: Bool = false
 
+    // Performance-only signal from the parent Settings document.
+    // While the document is physically scrolling, the embedded editor should
+    // not publish geometry state or keep drag interaction active.
+    var parentScrollActive: Bool = false
+
 
     @State
     private var selectedSection:
         ZestSettingsSection =
             .general
+
+    // This changes only when scrolling starts/stops; scroll position itself is
+    // deliberately not stored in SwiftUI state.
+    @State
+    private var settingsScrollActive =
+        false
 
 
     @State
@@ -1533,6 +1544,35 @@ struct ZestSettingsView: View {
         // and visible drag jitter. Freeze scrolling only for the active General
         // layout edit; Save/Cancel restores normal scrolling immediately.
         .scrollDisabled(selectedSection == .general && settingsManager.isLayoutEditing)
+        .onScrollPhaseChange { _, phase in
+            let active =
+                phase != .idle
+
+            guard
+                settingsScrollActive != active
+            else {
+                return
+            }
+
+            var transaction =
+                Transaction()
+
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+
+            withTransaction(
+                transaction
+            ) {
+                settingsScrollActive =
+                    active
+            }
+        }
+        .transaction { transaction in
+            if settingsScrollActive {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        }
     }
 
 
@@ -1633,7 +1673,14 @@ struct ZestSettingsView: View {
                                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
 
                             menuBarMonitorToolkitPiece
+                                .allowsHitTesting(
+                                    !settingsScrollActive
+                                )
+
                             menuBarPinnedToolkitPiece
+                                .allowsHitTesting(
+                                    !settingsScrollActive
+                                )
                         }
 
                         if menuBarDraftBlocks.contains(.pinnedActions) {
@@ -1653,6 +1700,9 @@ struct ZestSettingsView: View {
                                     }
                                 }
                                 .frame(width: 278, alignment: .leading)
+                                .allowsHitTesting(
+                                    !settingsScrollActive
+                                )
                             }
                             .transition(.opacity.combined(with: .move(edge: .top)))
                         }
@@ -1675,6 +1725,9 @@ struct ZestSettingsView: View {
                             pinnedFeatures: $menuBarDraftPinnedFeatures
                         )
                         .frame(width: 345, alignment: .topLeading)
+                        .allowsHitTesting(
+                            !settingsScrollActive
+                        )
                     }
                     .frame(width: 405, alignment: .topLeading)
                     }
@@ -1907,11 +1960,16 @@ struct ZestSettingsView: View {
                 ZestSettingsView(
                     settingsManager: settingsManager,
                     layoutOnly: true,
-                    onboardingLayoutMode: false
+                    onboardingLayoutMode: false,
+                    parentScrollActive:
+                        settingsScrollActive
                 )
                 .frame(
                     maxWidth: .infinity,
                     minHeight: 340
+                )
+                .allowsHitTesting(
+                    !settingsScrollActive
                 )
             }
         }
@@ -3887,6 +3945,15 @@ struct ZestSettingsView: View {
         .onPreferenceChange(
             SliceAssemblyCenterPreferenceKey.self
         ) { center in
+            // Scrolling changes the editor's position in the parent document,
+            // but not its own internal geometry. Avoid feeding that motion back
+            // into @State on every scroll/layout pass.
+            guard
+                !parentScrollActive
+            else {
+                return
+            }
+
             if center != .zero {
                 let dx = center.x - sliceAssemblyCenter.x
                 let dy = center.y - sliceAssemblyCenter.y
