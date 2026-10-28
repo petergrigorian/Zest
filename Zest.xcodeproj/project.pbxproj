@@ -6,13 +6,30 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		452DF7C3309145D00024FECD /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 452DF7C2309145D00024FECD /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		4587E4B130861D3A00FBFE1D /* Zest.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zest.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		452DF7C53091482C0024FECD /* Exceptions for "Zest" folder in "Zest" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 4587E4B030861D3A00FBFE1D /* Zest */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		4587E4B330861D3A00FBFE1D /* Zest */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				452DF7C53091482C0024FECD /* Exceptions for "Zest" folder in "Zest" target */,
+			);
 			path = Zest;
 			sourceTree = "<group>";
 		};
@@ -22,6 +39,7 @@
 		4587E4AE30861D3A00FBFE1D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				452DF7C3309145D00024FECD /* Sparkle in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -60,6 +78,9 @@
 				4587E4B330861D3A00FBFE1D /* Zest */,
 			);
 			name = Zest;
+			packageProductDependencies = (
+				452DF7C2309145D00024FECD /* Sparkle */,
+			);
 			productName = Zest;
 			productReference = 4587E4B130861D3A00FBFE1D /* Zest.app */;
 			productType = "com.apple.product-type.application";
@@ -88,6 +109,9 @@
 			);
 			mainGroup = 4587E4A830861D3A00FBFE1D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				452DF7C1309145D00024FECD /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4587E4B230861D3A00FBFE1D /* Products */;
 			projectDirPath = "";
@@ -243,7 +267,7 @@
 				AUTOMATION_APPLE_EVENTS = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 33BNC5G7G8;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -255,6 +279,7 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Zest/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Zest;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Zest uses automation to apply text formatting in Pages.";
@@ -263,7 +288,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.petergrigorian.Zest;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -290,7 +315,7 @@
 				AUTOMATION_APPLE_EVENTS = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 33BNC5G7G8;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -302,6 +327,7 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Zest/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Zest;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Zest uses automation to apply text formatting in Pages.";
@@ -310,7 +336,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.petergrigorian.Zest;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -349,6 +375,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		452DF7C1309145D00024FECD /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.10.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		452DF7C2309145D00024FECD /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 452DF7C1309145D00024FECD /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 4587E4A930861D3A00FBFE1D /* Project object */;
 	validationLevel = 1;

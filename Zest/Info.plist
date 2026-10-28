@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/petergrigorian/Zest/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>VJGO+KtGHWthpGqOLMEmjwKJ8xEumVo8Vu/Zx+F8Zjc</string>
+	<key>SUShowReleaseNotes</key>
+	<false/>
+</dict>
+</plist>

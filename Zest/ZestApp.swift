@@ -110,6 +110,12 @@ final class ZestAppDelegate:
         NSApp.setActivationPolicy(
             .regular
         )
+        
+        ZestSettingsBackupService.shared
+            .ensureSchemaVersion()
+
+        ZestUpdateManager.shared
+            .start()
 
         keyboardAssistantController = ZestKeyboardAssistantController(
             textContextManager: textContextManager,
