@@ -3,12 +3,16 @@
     <channel>
         <title>Zest</title>
         <item>
-            <title>0.1.1</title>
-            <pubDate>Wed, 28 Oct 2026 13:19:49 +0100</pubDate>
-            <sparkle:version>4</sparkle:version>
-            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <title>0.1.2</title>
+            <pubDate>Fri, 30 Oct 2026 13:49:31 +0100</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>27.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/petergrigorian/Zest/releases/download/v0.1.1-beta.2/Zest-0.1.1-build-4.zip" length="4255609" type="application/octet-stream" sparkle:edSignature="li6acuNUIqtUN9GVhmlEdw16xIF3A58QXbbOd+mb96EHBY4r6eINaOWiWc5IthQn/NsVAU1TUwbIl5nQyJd/Bg=="/>
+            <enclosure
+                url="https://github.com/petergrigorian/Zest/releases/download/v0.1.2-beta.1/Zest-0.1.2-build-5.zip"
+                length="4831638"
+                type="application/octet-stream"
+                sparkle:edSignature="nyrUgXfuMfDujZfoPPbNbnctmlJ060L2OZ+IvYtIhNwBf4rbAtOfINil8mLP/jwAoElcDEeaxyRn3MPQ5gtaBQ=="/>
         </item>
     </channel>
 </rss>
