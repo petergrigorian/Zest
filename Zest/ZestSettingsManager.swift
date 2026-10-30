@@ -10,6 +10,12 @@ import AppKit
 import Combine
 
 
+extension Notification.Name {
+    static let zestLayoutFixConfigurationDidSave =
+        Notification.Name("zest.layoutFix.configurationDidSave")
+}
+
+
 // MARK: - Accent Color
 
 struct ZestAccentPalette {
@@ -277,6 +283,7 @@ enum ZestFormFactor:
 
     case centerOnly
     case orangeSlice
+    case turntable
     case tripleSquare
 
 
@@ -295,6 +302,9 @@ enum ZestFormFactor:
         case .orangeSlice:
             return "Orange Slice"
 
+        case .turntable:
+            return "Turntable"
+
         case .tripleSquare:
             return "Triple Square"
         }
@@ -310,6 +320,9 @@ enum ZestFormFactor:
 
         case .orangeSlice:
             return "Classic Zest layout"
+
+        case .turntable:
+            return "Rotating utility faces"
 
         case .tripleSquare:
             return "Three customizable controls"
@@ -355,11 +368,17 @@ enum ZestFeature:
     case clipboard
     case emoji
     case symbols
+    case calendar
+    case today
+    case battery
+    case rapidSymbols
+    case layoutFix
     case settings
 
     // Configurable action tiles.
     case openShortcut
     case runShortcut
+    case url
     case empty
 
 
@@ -387,6 +406,21 @@ enum ZestFeature:
         case .symbols:
             return "Symbols"
 
+        case .calendar:
+            return "Calendar"
+
+        case .today:
+            return "Today"
+
+        case .battery:
+            return "Battery"
+
+        case .rapidSymbols:
+            return "Rapid Symbols"
+
+        case .layoutFix:
+            return "Layout Fix"
+
         case .settings:
             return "Settings"
 
@@ -395,6 +429,8 @@ enum ZestFeature:
 
         case .runShortcut:
             return "Shortcut"
+        case .url:
+            return "URL"
         case .empty:
             return ""
         }
@@ -414,12 +450,24 @@ enum ZestFeature:
             return "Emoji picker"
         case .symbols:
             return "Symbols"
+        case .calendar:
+            return "Upcoming events"
+        case .today:
+            return "Today’s agenda"
+        case .battery:
+            return "Battery status"
+        case .rapidSymbols:
+            return "One-key symbols"
+        case .layoutFix:
+            return "Fix wrong layout"
         case .settings:
             return "Zest controls"
         case .openShortcut:
             return "Open an app"
         case .runShortcut:
             return "Run an action"
+        case .url:
+            return "Open a link"
         case .empty:
             return ""
         }
@@ -445,6 +493,21 @@ enum ZestFeature:
         case .symbols:
             return "text.and.command.interface.window"
 
+        case .calendar:
+            return "calendar"
+
+        case .today:
+            return "calendar.day.timeline.left"
+
+        case .battery:
+            return "battery.100percent"
+
+        case .rapidSymbols:
+            return "sparkles"
+
+        case .layoutFix:
+            return "keyboard.badge.ellipsis"
+
         case .settings:
             return "gearshape"
 
@@ -453,6 +516,8 @@ enum ZestFeature:
 
         case .runShortcut:
             return "play.fill"
+        case .url:
+            return "link"
         case .empty:
             return "circle.dashed"
         }
@@ -580,6 +645,27 @@ struct ZestKeyboardShortcut:
 }
 
 
+// MARK: - Layout Fix Target
+
+struct ZestLayoutFixTarget: Codable, Equatable, Identifiable {
+    var inputSourceID: String
+    var name: String
+    var shortLabel: String
+    var triggerKeyCode: UInt16
+
+    var id: String { inputSourceID }
+
+    static let digitOptions: [(label: String, keyCode: UInt16)] = [
+        ("1", 18), ("2", 19), ("3", 20), ("4", 21), ("5", 23),
+        ("6", 22), ("7", 26), ("8", 28), ("9", 25)
+    ]
+
+    var triggerLabel: String {
+        Self.digitOptions.first(where: { $0.keyCode == triggerKeyCode })?.label ?? "?"
+    }
+}
+
+
 // MARK: - Settings Manager
 
 @MainActor
@@ -604,7 +690,8 @@ final class ZestSettingsManager:
     }
 
 
-    // Center Only has three layouts: language, twoFeature and fourFeature.
+    // Center Only supports the language turntable, clock/calendar faces,
+    // two split layouts, and the two fixed-top + three-tile variants.
     @Published
     var centerOnlyPage: String {
         didSet { save() }
@@ -617,6 +704,12 @@ final class ZestSettingsManager:
 
     @Published
     var centerOnlyFourFeatures: [ZestFeature] {
+        didSet { save() }
+    }
+
+    // Shared three-tile assignment used by both Calendar + 3 and Clock + 3.
+    @Published
+    var centerOnlyThreeFeatures: [ZestFeature] {
         didSet { save() }
     }
 
@@ -652,6 +745,32 @@ final class ZestSettingsManager:
     }
     @Published var saturnPreviousShortcut: ZestKeyboardShortcut { didSet { saveShortcutImmediately(saturnPreviousShortcut, key: Key.saturnPreviousShortcut) } }
     @Published var saturnNextShortcut: ZestKeyboardShortcut { didSet { saveShortcutImmediately(saturnNextShortcut, key: Key.saturnNextShortcut) } }
+
+    // Layout Fix is shortcut-first: press the leader chord, then one target key.
+    @Published var layoutFixEnabled: Bool {
+        didSet { saveBoolImmediately(layoutFixEnabled, key: Key.layoutFixEnabled) }
+    }
+    @Published var layoutFixLeaderShortcut: ZestKeyboardShortcut {
+        didSet { saveShortcutImmediately(layoutFixLeaderShortcut, key: Key.layoutFixLeaderShortcut) }
+    }
+    @Published var layoutFixTargets: [ZestLayoutFixTarget] {
+        didSet { saveLayoutFixTargetsImmediately() }
+    }
+
+    // Optional diagnostic marker showing the caret position Zest resolved.
+    @Published var showCaretIndicator: Bool {
+        didSet { saveBoolImmediately(showCaretIndicator, key: Key.showCaretIndicator) }
+    }
+
+    // Accessibility display preference for denser, higher-contrast popup surfaces.
+    @Published var increaseVisibility: Bool {
+        didSet { saveBoolImmediately(increaseVisibility, key: Key.increaseVisibility) }
+    }
+
+    // Notification permission and this preference are intentionally separate.
+    @Published var notifyWhenZestStarts: Bool {
+        didSet { saveBoolImmediately(notifyWhenZestStarts, key: Key.notifyWhenZestStarts) }
+    }
 
 
     @Published
@@ -793,6 +912,9 @@ final class ZestSettingsManager:
         static let centerOnlyFourFeatures =
             "zest.settings.centerOnlyFourFeatures"
 
+        static let centerOnlyThreeFeatures =
+            "zest.settings.centerOnlyThreeFeatures"
+
         static let tripleFeatures = "zest.settings.tripleFeatures"
         static let showInMenuBar = "zest.settings.showInMenuBar"
         static let menuBarBlocks = "zest.settings.menuBarBlocks"
@@ -800,6 +922,12 @@ final class ZestSettingsManager:
         static let rapidInputSourceSwitching = "zest.settings.rapidInputSourceSwitching"
         static let saturnPreviousShortcut = "zest.settings.saturnPreviousShortcut"
         static let saturnNextShortcut = "zest.settings.saturnNextShortcut"
+        static let layoutFixEnabled = "zest.settings.layoutFixEnabled"
+        static let layoutFixLeaderShortcut = "zest.settings.layoutFixLeaderShortcut"
+        static let layoutFixTargets = "zest.settings.layoutFixTargets"
+        static let showCaretIndicator = "zest.settings.showCaretIndicator"
+        static let increaseVisibility = "zest.settings.increaseVisibility"
+        static let notifyWhenZestStarts = "zest.settings.notifyWhenZestStarts"
 
         static let sliceAssignments =
             "zest.settings.sliceAssignments"
@@ -837,6 +965,7 @@ final class ZestSettingsManager:
     private var layoutSnapshotCenterOnlyPage: String?
     private var layoutSnapshotCenterOnlyTwoFeatures: [ZestFeature]?
     private var layoutSnapshotCenterOnlyFourFeatures: [ZestFeature]?
+    private var layoutSnapshotCenterOnlyThreeFeatures: [ZestFeature]?
     private var layoutSnapshotTripleFeatures: [ZestFeature]?
     private var layoutSnapshotAssignments: [ZestSliceSlot: ZestFeature]?
     private var layoutSnapshotApplications: [ZestSliceSlot: ZestApplicationTarget]?
@@ -869,12 +998,21 @@ final class ZestSettingsManager:
 
         centerOnlyTwoFeatures = [.emoji, .clipboard]
         centerOnlyFourFeatures = [.size, .font, .emoji, .symbols]
+        centerOnlyThreeFeatures = [.clipboard, .emoji, .symbols]
         tripleFeatures = [.clipboard, .emoji, .symbols]
         showInMenuBar = true
         hasCompletedOnboarding = false
         menuBarBlocks = [.monitors, .pinnedActions]
         menuBarPinnedFeatures = [.size, .font, .clipboard, .emoji, .symbols]
         rapidInputSourceSwitching = true
+        layoutFixEnabled = true
+        layoutFixLeaderShortcut = ZestKeyboardShortcut(
+            keyCode: 37, command: false, option: false, control: true, shift: true
+        )
+        layoutFixTargets = []
+        showCaretIndicator = false
+        increaseVisibility = false
+        notifyWhenZestStarts = true
 
         // Default rapid input-source steering: Control + Option + Left/Right.
         // Both shortcuts remain fully recordable in Settings.
@@ -898,9 +1036,21 @@ final class ZestSettingsManager:
 
         load()
 
+        // v35 separates rotating utility faces from action-oriented Center Only.
+        // Preserve the user's currently selected legacy Center Only face by moving
+        // the form factor to Turntable when that face belongs to the new family.
+        if formFactor == .centerOnly,
+           ["language", "clockCalendar", "languageClock"].contains(centerOnlyPage) {
+            formFactor = .turntable
+        } else if formFactor == .turntable,
+                  !["language", "clockCalendar", "languageClock"].contains(centerOnlyPage) {
+            centerOnlyPage = "language"
+        }
 
         isLoading =
             false
+
+        save()
     }
 
 
@@ -1003,6 +1153,8 @@ final class ZestSettingsManager:
             return applicationTargets[slot] != nil
         case .runShortcut:
             return shortcutTargets[slot] != nil
+        case .url:
+            return ZestURLTargetStore.shared.target(for: slot.rawValue) != nil
         default:
             return true
         }
@@ -1018,21 +1170,43 @@ final class ZestSettingsManager:
         shortcutTargets[slot] = target
     }
 
+    func configureURL(_ target: ZestURLTarget, for slot: ZestSliceSlot) {
+        ZestURLTargetStore.shared.set(target, for: slot.rawValue)
+        objectWillChange.send()
+    }
+
 
     @discardableResult
     func performConfiguredAction(for feature: ZestFeature, in slot: ZestSliceSlot) -> Bool {
         switch feature {
         case .openShortcut:
             guard let target = applicationTargets[slot] else { return false }
-            let url = URL(fileURLWithPath: target.path)
+            if ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                placementKey: "slice.\(slot.rawValue)",
+                kind: .application
+            ), !ZestActionConfirmation.ask(
+                title: "Open \(target.name)?",
+                detail: "Zest will open this application.",
+                icon: NSWorkspace.shared.icon(forFile: target.path)
+            ) { return false }
+
             NSWorkspace.shared.openApplication(
-                at: url,
+                at: URL(fileURLWithPath: target.path),
                 configuration: NSWorkspace.OpenConfiguration()
             )
             return true
 
         case .runShortcut:
             guard let target = shortcutTargets[slot] else { return false }
+            if ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                placementKey: "slice.\(slot.rawValue)",
+                kind: .shortcut
+            ), !ZestActionConfirmation.ask(
+                title: "Run \(target.name)?",
+                detail: "Zest will run this Apple Shortcut.",
+                icon: ZestActionIconResolver.shared.shortcutFallbackIcon()
+            ) { return false }
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
             process.arguments = ["run", target.name]
@@ -1043,6 +1217,25 @@ final class ZestSettingsManager:
                 print("🍊 SHORTCUT ERROR → \(error.localizedDescription)")
                 return false
             }
+
+        case .url:
+            guard let target = ZestURLTargetStore.shared.target(for: slot.rawValue) else { return false }
+            let needsConfirmation = target.askBeforeOpening ||
+                ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                    placementKey: "slice.\(slot.rawValue)",
+                    kind: .url
+                )
+            if needsConfirmation,
+               !ZestActionConfirmation.ask(
+                    title: "Open \(target.name)?",
+                    detail: target.urlString,
+                    icon: ZestActionIconResolver.shared.cachedURLIcon(for: target.urlString)
+               ) { return false }
+
+            return ZestActionIconResolver.shared.openURL(
+                target.urlString,
+                browserBundleIdentifier: target.browserBundleIdentifier
+            )
 
         default:
             return false
@@ -1056,6 +1249,7 @@ final class ZestSettingsManager:
         let key = centerActionKey(count: count, index: index)
         if feature == .openShortcut { return centerApplicationTargets[key] != nil }
         if feature == .runShortcut { return centerShortcutTargets[key] != nil }
+        if feature == .url { return ZestURLTargetStore.shared.target(centerKey: key) != nil }
         return true
     }
 
@@ -1065,15 +1259,73 @@ final class ZestSettingsManager:
     func configureCenterShortcut(_ target: ZestShortcutTarget, count: Int, index: Int) {
         centerShortcutTargets[centerActionKey(count: count, index: index)] = target
     }
-    @discardableResult func performCenterConfiguredAction(_ feature: ZestFeature, count: Int, index: Int) -> Bool {
+    func configureCenterURL(_ target: ZestURLTarget, count: Int, index: Int) {
+        ZestURLTargetStore.shared.set(target, centerKey: centerActionKey(count: count, index: index))
+        objectWillChange.send()
+    }
+    @discardableResult
+    func performCenterConfiguredAction(_ feature: ZestFeature, count: Int, index: Int) -> Bool {
         let key = centerActionKey(count: count, index: index)
+        let placementKey = "center.\(key)"
+
         if feature == .openShortcut, let target = centerApplicationTargets[key] {
-            return NSWorkspace.shared.open(URL(fileURLWithPath: target.path))
+            if ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                placementKey: placementKey,
+                kind: .application
+            ), !ZestActionConfirmation.ask(
+                title: "Open \(target.name)?",
+                detail: "Zest will open this application.",
+                icon: NSWorkspace.shared.icon(forFile: target.path)
+            ) { return false }
+
+            NSWorkspace.shared.openApplication(
+                at: URL(fileURLWithPath: target.path),
+                configuration: NSWorkspace.OpenConfiguration()
+            )
+            return true
         }
+
         if feature == .runShortcut, let target = centerShortcutTargets[key] {
-            let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts"); process.arguments = ["run", target.name]
-            do { try process.run(); return true } catch { return false }
+            if ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                placementKey: placementKey,
+                kind: .shortcut
+            ), !ZestActionConfirmation.ask(
+                title: "Run \(target.name)?",
+                detail: "Zest will run this Apple Shortcut.",
+                icon: ZestActionIconResolver.shared.shortcutFallbackIcon()
+            ) { return false }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+            process.arguments = ["run", target.name]
+            do {
+                try process.run()
+                return true
+            } catch {
+                print("🍊 SHORTCUT ERROR → \(error.localizedDescription)")
+                return false
+            }
         }
+
+        if feature == .url, let target = ZestURLTargetStore.shared.target(centerKey: key) {
+            let needsConfirmation = target.askBeforeOpening ||
+                ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                    placementKey: placementKey,
+                    kind: .url
+                )
+            if needsConfirmation,
+               !ZestActionConfirmation.ask(
+                    title: "Open \(target.name)?",
+                    detail: target.urlString,
+                    icon: ZestActionIconResolver.shared.cachedURLIcon(for: target.urlString)
+               ) { return false }
+
+            return ZestActionIconResolver.shared.openURL(
+                target.urlString,
+                browserBundleIdentifier: target.browserBundleIdentifier
+            )
+        }
+
         return false
     }
 
@@ -1098,6 +1350,10 @@ final class ZestSettingsManager:
         isLayoutEditing ? (layoutSnapshotCenterOnlyFourFeatures ?? centerOnlyFourFeatures) : centerOnlyFourFeatures
     }
 
+    var runtimeCenterOnlyThreeFeatures: [ZestFeature] {
+        isLayoutEditing ? (layoutSnapshotCenterOnlyThreeFeatures ?? centerOnlyThreeFeatures) : centerOnlyThreeFeatures
+    }
+
     var runtimeTripleFeatures: [ZestFeature] {
         isLayoutEditing ? (layoutSnapshotTripleFeatures ?? tripleFeatures) : tripleFeatures
     }
@@ -1115,6 +1371,7 @@ final class ZestSettingsManager:
         layoutSnapshotCenterOnlyPage = centerOnlyPage
         layoutSnapshotCenterOnlyTwoFeatures = centerOnlyTwoFeatures
         layoutSnapshotCenterOnlyFourFeatures = centerOnlyFourFeatures
+        layoutSnapshotCenterOnlyThreeFeatures = centerOnlyThreeFeatures
         layoutSnapshotTripleFeatures = tripleFeatures
         layoutSnapshotAssignments = sliceAssignments
         layoutSnapshotApplications = applicationTargets
@@ -1133,6 +1390,7 @@ final class ZestSettingsManager:
         layoutSnapshotCenterOnlyPage = nil
         layoutSnapshotCenterOnlyTwoFeatures = nil
         layoutSnapshotCenterOnlyFourFeatures = nil
+        layoutSnapshotCenterOnlyThreeFeatures = nil
         layoutSnapshotTripleFeatures = nil
         layoutSnapshotAssignments = nil
         layoutSnapshotApplications = nil
@@ -1164,6 +1422,9 @@ final class ZestSettingsManager:
         if let value = layoutSnapshotCenterOnlyFourFeatures {
             centerOnlyFourFeatures = value
         }
+        if let value = layoutSnapshotCenterOnlyThreeFeatures {
+            centerOnlyThreeFeatures = value
+        }
         if let value = layoutSnapshotTripleFeatures {
             tripleFeatures = value
         }
@@ -1189,6 +1450,7 @@ final class ZestSettingsManager:
         layoutSnapshotCenterOnlyPage = nil
         layoutSnapshotCenterOnlyTwoFeatures = nil
         layoutSnapshotCenterOnlyFourFeatures = nil
+        layoutSnapshotCenterOnlyThreeFeatures = nil
         layoutSnapshotTripleFeatures = nil
         layoutSnapshotAssignments = nil
         layoutSnapshotApplications = nil
@@ -1220,10 +1482,19 @@ final class ZestSettingsManager:
         centerOnlyPage = "language"
         centerOnlyTwoFeatures = [.emoji, .clipboard]
         centerOnlyFourFeatures = [.size, .font, .emoji, .symbols]
+        centerOnlyThreeFeatures = [.clipboard, .emoji, .symbols]
         tripleFeatures = [.clipboard, .emoji, .symbols]
         menuBarBlocks = [.monitors, .pinnedActions]
         menuBarPinnedFeatures = [.size, .font, .clipboard, .emoji, .symbols]
         rapidInputSourceSwitching = true
+        layoutFixEnabled = true
+        layoutFixLeaderShortcut = ZestKeyboardShortcut(
+            keyCode: 37, command: false, option: false, control: true, shift: true
+        )
+        layoutFixTargets = []
+        showCaretIndicator = false
+        increaseVisibility = false
+        notifyWhenZestStarts = true
 
         // Default rapid input-source steering: Control + Option + Left/Right.
         // Both shortcuts remain fully recordable in Settings.
@@ -1267,10 +1538,19 @@ final class ZestSettingsManager:
         centerOnlyPage = "language"
         centerOnlyTwoFeatures = [.emoji, .clipboard]
         centerOnlyFourFeatures = [.size, .font, .emoji, .symbols]
+        centerOnlyThreeFeatures = [.clipboard, .emoji, .symbols]
         tripleFeatures = [.clipboard, .emoji, .symbols]
         menuBarBlocks = [.monitors, .pinnedActions]
         menuBarPinnedFeatures = [.size, .font, .clipboard, .emoji, .symbols]
         rapidInputSourceSwitching = true
+        layoutFixEnabled = true
+        layoutFixLeaderShortcut = ZestKeyboardShortcut(
+            keyCode: 37, command: false, option: false, control: true, shift: true
+        )
+        layoutFixTargets = []
+        showCaretIndicator = false
+        increaseVisibility = false
+        notifyWhenZestStarts = true
 
         // Default rapid input-source steering: Control + Option + Left/Right.
         // Both shortcuts remain fully recordable in Settings.
@@ -1333,16 +1613,21 @@ final class ZestSettingsManager:
         if let data = defaults.data(forKey: Key.centerOnlyTwoFeatures),
            let decoded = try? JSONDecoder().decode([ZestFeature].self, from: data),
            decoded.count == 2 {
-            centerOnlyTwoFeatures = decoded
+            centerOnlyTwoFeatures = decoded.map { $0 == .rapidSymbols ? .symbols : $0 }
         }
         if let data = defaults.data(forKey: Key.centerOnlyFourFeatures),
            let decoded = try? JSONDecoder().decode([ZestFeature].self, from: data),
            decoded.count == 4 {
-            centerOnlyFourFeatures = decoded
+            centerOnlyFourFeatures = decoded.map { $0 == .rapidSymbols ? .symbols : $0 }
+        }
+        if let data = defaults.data(forKey: Key.centerOnlyThreeFeatures),
+           let decoded = try? JSONDecoder().decode([ZestFeature].self, from: data),
+           decoded.count == 3 {
+            centerOnlyThreeFeatures = decoded.map { $0 == .rapidSymbols ? .symbols : $0 }
         }
         if let data = defaults.data(forKey: Key.tripleFeatures),
            let decoded = try? JSONDecoder().decode([ZestFeature].self, from: data), decoded.count == 3 {
-            tripleFeatures = decoded
+            tripleFeatures = decoded.map { $0 == .rapidSymbols ? .symbols : $0 }
         }
         if defaults.object(forKey: Key.showInMenuBar) != nil {
             showInMenuBar = defaults.bool(forKey: Key.showInMenuBar)
@@ -1359,10 +1644,30 @@ final class ZestSettingsManager:
         }
         if let data = defaults.data(forKey: Key.menuBarPinnedFeatures),
            let decoded = try? JSONDecoder().decode([ZestFeature].self, from: data), decoded.count == 5 {
-            menuBarPinnedFeatures = decoded
+            menuBarPinnedFeatures = decoded.map { $0 == .rapidSymbols ? .symbols : $0 }
         }
         if defaults.object(forKey: Key.rapidInputSourceSwitching) != nil {
             rapidInputSourceSwitching = defaults.bool(forKey: Key.rapidInputSourceSwitching)
+        }
+        if defaults.object(forKey: Key.layoutFixEnabled) != nil {
+            layoutFixEnabled = defaults.bool(forKey: Key.layoutFixEnabled)
+        }
+        if let data = defaults.data(forKey: Key.layoutFixLeaderShortcut),
+           let decoded = try? JSONDecoder().decode(ZestKeyboardShortcut.self, from: data) {
+            layoutFixLeaderShortcut = decoded
+        }
+        if let data = defaults.data(forKey: Key.layoutFixTargets),
+           let decoded = try? JSONDecoder().decode([ZestLayoutFixTarget].self, from: data) {
+            layoutFixTargets = decoded
+        }
+        if defaults.object(forKey: Key.showCaretIndicator) != nil {
+            showCaretIndicator = defaults.bool(forKey: Key.showCaretIndicator)
+        }
+        if defaults.object(forKey: Key.increaseVisibility) != nil {
+            increaseVisibility = defaults.bool(forKey: Key.increaseVisibility)
+        }
+        if defaults.object(forKey: Key.notifyWhenZestStarts) != nil {
+            notifyWhenZestStarts = defaults.bool(forKey: Key.notifyWhenZestStarts)
         }
         if let data = defaults.data(forKey: Key.saturnPreviousShortcut),
            let decoded = try? JSONDecoder().decode(ZestKeyboardShortcut.self, from: data) { saturnPreviousShortcut = decoded }
@@ -1404,7 +1709,7 @@ final class ZestSettingsManager:
 
 
                 assignments[slot] =
-                    feature
+                    feature == .rapidSymbols ? .symbols : feature
             }
 
 
@@ -1484,6 +1789,14 @@ final class ZestSettingsManager:
         }
     }
 
+    private func saveLayoutFixTargetsImmediately() {
+        guard !isLoading else { return }
+        if let data = try? JSONEncoder().encode(layoutFixTargets) {
+            defaults.set(data, forKey: Key.layoutFixTargets)
+            defaults.synchronize()
+        }
+    }
+
 
     // MARK: Save
 
@@ -1525,11 +1838,17 @@ final class ZestSettingsManager:
         if let data = try? JSONEncoder().encode(centerOnlyFourFeatures) {
             defaults.set(data, forKey: Key.centerOnlyFourFeatures)
         }
+        if let data = try? JSONEncoder().encode(centerOnlyThreeFeatures) {
+            defaults.set(data, forKey: Key.centerOnlyThreeFeatures)
+        }
         if let data = try? JSONEncoder().encode(tripleFeatures) { defaults.set(data, forKey: Key.tripleFeatures) }
         if let data = try? JSONEncoder().encode(menuBarBlocks) { defaults.set(data, forKey: Key.menuBarBlocks) }
         if let data = try? JSONEncoder().encode(menuBarPinnedFeatures) { defaults.set(data, forKey: Key.menuBarPinnedFeatures) }
         if let data = try? JSONEncoder().encode(saturnPreviousShortcut) { defaults.set(data, forKey: Key.saturnPreviousShortcut) }
         if let data = try? JSONEncoder().encode(saturnNextShortcut) { defaults.set(data, forKey: Key.saturnNextShortcut) }
+        if let data = try? JSONEncoder().encode(layoutFixLeaderShortcut) { defaults.set(data, forKey: Key.layoutFixLeaderShortcut) }
+        if let data = try? JSONEncoder().encode(layoutFixTargets) { defaults.set(data, forKey: Key.layoutFixTargets) }
+        defaults.set(layoutFixEnabled, forKey: Key.layoutFixEnabled)
 
 
         let encodableAssignments:

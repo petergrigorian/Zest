@@ -166,6 +166,9 @@ struct ZestMenuBarPanel: View {
                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                                             onShowZest()
                                         }
+                                    } else if feature == .rapidSymbols {
+                                        selectedFeature = nil
+                                        ZestRapidSymbolEngine.shared.arm()
                                     } else {
                                         selectedFeature = (selectedFeature == feature) ? nil : feature
                                     }
@@ -346,6 +349,14 @@ private struct ZestMenuFeatureHost: View {
                 clipboardManager: clipboardManager,
                 accentColor: accentColor
             )
+        case .calendar:
+            ZestCalendarPanel(accentColor: accentColor)
+        case .today:
+            ZestTodayPanel(accentColor: accentColor)
+        case .battery:
+            ZestBatteryPanel(accentColor: accentColor)
+        case .layoutFix:
+            ZestLayoutFixPanel(accentColor: accentColor)
         default:
             EmptyView()
         }
@@ -645,7 +656,7 @@ struct ZestMenuBarGlyph: View {
         let endGap = max(1.0, s * 0.026)
 
         ZStack {
-            ForEach(ZestSliceVisualSlot.all) { slot in
+            ForEach(ZestV34SliceVisualSlot.all) { slot in
                 ZestTileShape(
                     startAngle: slot.startAngle,
                     endAngle: slot.endAngle,

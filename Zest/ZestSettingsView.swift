@@ -8,6 +8,15 @@ import AppKit
 import UniformTypeIdentifiers
 
 
+extension Notification.Name {
+    /// Layout-only editors never own setup presentation. They forward setup
+    /// requests to the top-level Settings shell so the material workspace can
+    /// cover the entire native Settings window.
+    static let zestSettingsSetupRequested =
+        Notification.Name("zest.settings.setupRequested")
+}
+
+
 private struct SliceAssemblyCenterPreferenceKey: PreferenceKey {
     static var defaultValue: CGPoint = .zero
 
@@ -168,6 +177,32 @@ private struct CenterOnlyRingDropDelegate: DropDelegate {
 }
 
 
+/// Bottom-half sector geometry used by the Calendar + 3 / Clock + 3 setup editor.
+/// Indices read left-to-right: 0 = lower-left, 1 = bottom, 2 = lower-right.
+private struct CenterOnlyBottomThirdDropShape: Shape {
+    let index: Int
+
+    func path(in rect: CGRect) -> Path {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        let start = 120.0 - Double(index) * 60.0
+        let end = start + 60.0
+
+        var path = Path()
+        path.move(to: center)
+        path.addArc(
+            center: center,
+            radius: radius,
+            startAngle: .degrees(start),
+            endAngle: .degrees(end),
+            clockwise: false
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+
 // MARK: - Shortcut Recorder
 
 struct ZestShortcutRecorderRow: View {
@@ -248,6 +283,13 @@ struct ZestShortcutRecorderRow: View {
 
 // MARK: - Settings View
 
+
+private struct ZestFeatureLibraryGroup: Identifiable {
+    let id: String
+    let title: String
+    let features: [ZestFeature]
+}
+
 struct ZestSettingsView: View {
 
     @Environment(\.openWindow) private var openWindow
@@ -257,6 +299,10 @@ struct ZestSettingsView: View {
     @ObservedObject
     var settingsManager:
         ZestSettingsManager
+
+    @ObservedObject
+    private var accessibilityService =
+        ZestAccessibilityService.shared
 
     // Reuse the production Feature Placement editor outside the Settings shell
     // (currently used by first-run onboarding). This deliberately renders the
@@ -280,6 +326,14 @@ struct ZestSettingsView: View {
     @State
     private var settingsScrollActive =
         false
+
+    @State private var layoutDragActive = false
+
+    // Orange-slice feature library organization.
+    @State private var collapsedFeatureGroups: Set<String> = []
+    @State private var pagesOnlyInfoFeature: ZestFeature?
+    @State private var centerFeatureBankTab = "text"
+    @State private var tripleFeatureBankTab = "text"
 
 
     @State
@@ -336,6 +390,12 @@ struct ZestSettingsView: View {
     @State private var centerOnlyDraggedFeature: ZestFeature?
     @State private var centerOnlyDraggedSourceIndex: Int?
     @State private var centerOnlyMagneticTargetIndex: Int?
+    @State private var centerOnlyClockCalendarShowsCalendar = false
+    @State private var centerOnlyClockCalendarRotation: Double = 0
+    @State private var centerOnlyClockCalendarOpacity: Double = 1
+    @State private var turntableLanguageIndex: Int = 0
+    @State private var turntableLanguageRotation: Double = 0
+    @State private var turntableLanguageOpacity: Double = 1
 
     @State private var actionSetupSlot: ZestSliceSlot?
     @State private var actionSetupCenterIndex: Int?
@@ -345,8 +405,17 @@ struct ZestSettingsView: View {
     @State private var availableShortcuts: [String] = []
     @State private var selectedApplicationPath: String = ""
     @State private var selectedShortcutName: String = ""
+    @State private var selectedURLName: String = "Website"
+    @State private var selectedURLString: String = "https://"
+    @State private var selectedURLAskBeforeOpening = false
+    @State private var selectedActionRequiresConfirmation = false
     @State private var actionSetupVisible = false
     @State private var actionSelectorExpanded = true
+
+    // Setup overlays for configurable built-in tiles such as Calendar/Today/Battery.
+    @State private var tileSetupFeature: ZestFeature?
+    @State private var tileSetupVisible = false
+    @State private var tileSetupCalendarStep = 1
 
     @State private var showLayoutSavePrompt = false
     @State private var showIncompleteLayoutPrompt = false
@@ -405,6 +474,13 @@ struct ZestSettingsView: View {
                     .zIndex(5000)
             }
 
+            if tileSetupFeature != nil {
+                tileSetupOverlay
+                    .opacity(tileSetupVisible ? 1 : 0)
+                    .transition(.opacity)
+                    .zIndex(5100)
+            }
+
             if showLayoutSavePrompt {
                 layoutSaveConfirmationOverlay
                     .transition(.opacity)
@@ -446,7 +522,20 @@ struct ZestSettingsView: View {
         }
         .onAppear {
             if !centerOnlyModes.contains(settingsManager.centerOnlyPage) {
-                settingsManager.centerOnlyPage = "language"
+                settingsManager.centerOnlyPage = settingsManager.formFactor == .turntable ? "language" : "clockThree"
+            }
+
+            // A runtime tile may hand a configuration task off to Settings.
+            // Consume the request only after this full Settings shell exists.
+            if !layoutOnly,
+               let raw = UserDefaults.standard.string(forKey: "zest.settings.pendingBuiltInSetup"),
+               let feature = ZestFeature(rawValue: raw),
+               isBuiltInConfigurableFeature(feature) {
+                UserDefaults.standard.removeObject(forKey: "zest.settings.pendingBuiltInSetup")
+                selectedSection = .general
+                DispatchQueue.main.async {
+                    presentTileSetup(feature)
+                }
             }
         }
         .onReceive(
@@ -455,6 +544,44 @@ struct ZestSettingsView: View {
             )
         ) { _ in
             handleSettingsCloseRequest()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .zestSettingsSetupRequested
+            )
+        ) { note in
+            guard !layoutOnly,
+                  let info = note.userInfo,
+                  let kind = info["kind"] as? String,
+                  let rawFeature = info["feature"] as? String,
+                  let feature = ZestFeature(rawValue: rawFeature)
+            else { return }
+
+            selectedSection = .general
+
+            if kind == "builtIn" {
+                presentTileSetup(feature)
+                return
+            }
+
+            if kind == "action" {
+                if let rawSlot = info["slot"] as? Int,
+                   let slot = ZestSliceSlot(rawValue: rawSlot) {
+                    presentActionSetup(feature: feature, slot: slot)
+                    return
+                }
+
+                if let index = info["centerIndex"] as? Int,
+                   let count = info["centerCount"] as? Int {
+                    presentCenterActionSetup(feature: feature, index: index, count: count)
+                }
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .zestLayoutDragStateChanged)
+        ) { note in
+            guard !layoutOnly else { return }
+            layoutDragActive = (note.object as? Bool) ?? false
         }
         .onReceive(NotificationCenter.default.publisher(for: .zestOnboardingCommitLayout)) { _ in
             guard onboardingLayoutMode, settingsManager.isLayoutEditing else { return }
@@ -478,10 +605,11 @@ struct ZestSettingsView: View {
         switch settingsManager.formFactor {
         case .orangeSlice:
             return settingsManager.isOrangeSliceComplete
-        case .centerOnly:
+        case .centerOnly, .turntable:
             switch settingsManager.centerOnlyPage {
             case "twoFeature": return settingsManager.centerOnlyTwoFeatures.count == 2 && !settingsManager.centerOnlyTwoFeatures.contains(.empty)
             case "fourFeature": return settingsManager.centerOnlyFourFeatures.count == 4 && !settingsManager.centerOnlyFourFeatures.contains(.empty)
+            case "calendarThree", "clockThree": return settingsManager.centerOnlyThreeFeatures.count == 3 && !settingsManager.centerOnlyThreeFeatures.contains(.empty)
             default: return true
             }
         case .tripleSquare:
@@ -534,6 +662,11 @@ struct ZestSettingsView: View {
 
 
     private func handleSettingsCloseRequest() {
+        // Only the outer Settings shell owns window-close decisions. The
+        // embedded layout editor shares the same settings manager, but must not
+        // respond to the same close notification a second time.
+        guard !layoutOnly else { return }
+
         guard settingsManager.isLayoutEditing else {
             NotificationCenter.default.post(
                 name: .zestSettingsForceClose,
@@ -710,12 +843,192 @@ struct ZestSettingsView: View {
     }
 
 
+    // MARK: - Built-in Tile Setup
+
+    private func isBuiltInConfigurableFeature(_ feature: ZestFeature) -> Bool {
+        feature == .calendar || feature == .today || feature == .battery || feature == .layoutFix
+    }
+
+    private func configurableFeatureButton(_ feature: ZestFeature) -> some View {
+        Button {
+            presentTileSetup(feature)
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: feature.systemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(accentColor)
+                Text(feature == .calendar ? "Calendar & Today" : feature.title)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 70)
+            .background {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.primary.opacity(0.040))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
+            }
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+    }
+
+    private func presentTileSetup(_ feature: ZestFeature) {
+        guard isBuiltInConfigurableFeature(feature) else { return }
+
+        // The production tile editor is embedded as a layout-only child view.
+        // A child overlay can never cover the complete Settings window, so send
+        // the request upward and let the top-level shell own presentation.
+        if layoutOnly && !onboardingLayoutMode {
+            NotificationCenter.default.post(
+                name: .zestSettingsSetupRequested,
+                object: nil,
+                userInfo: [
+                    "kind": "builtIn",
+                    "feature": feature.rawValue
+                ]
+            )
+            return
+        }
+
+        tileSetupFeature = feature
+        if feature == .calendar || feature == .today {
+            tileSetupCalendarStep = ZestCalendarService.shared.isConnected ? 2 : 1
+        } else {
+            tileSetupCalendarStep = 1
+        }
+        tileSetupVisible = false
+
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                tileSetupVisible = true
+            }
+        }
+    }
+
+    private func dismissTileSetup() {
+        withAnimation(.easeInOut(duration: 0.20)) {
+            tileSetupVisible = false
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+            tileSetupFeature = nil
+            tileSetupCalendarStep = 1
+        }
+    }
+
+    private var tileSetupOverlay: some View {
+        ZestSettingsSetupWorkspace(
+            title: tileSetupTitle,
+            subtitle: "Configure how this Zest feature behaves and what it displays.",
+            systemImage: tileSetupFeature?.systemImage ?? "slider.horizontal.3",
+            accentColor: accentColor,
+            onClose: { dismissTileSetup() },
+            onSave: {
+                if tileSetupFeature == .layoutFix {
+                    _ = ZestLayoutFixServiceShortcutManager.shared.applyConfiguredShortcuts(
+                        targets: settingsManager.layoutFixTargets,
+                        enabled: settingsManager.layoutFixEnabled
+                    )
+                    NotificationCenter.default.post(
+                        name: .zestLayoutFixConfigurationDidSave,
+                        object: nil
+                    )
+                } else if tileSetupFeature == .battery {
+                    ZestBatteryService.shared.completeSetup()
+                }
+                dismissTileSetup()
+            }
+        ) {
+            Group {
+                if tileSetupFeature == .calendar {
+                    ZestCalendarSetupView(
+                        accentColor: accentColor,
+                        setupStep: $tileSetupCalendarStep,
+                        showsResetAction: true,
+                        spacious: true,
+                        onFinished: { dismissTileSetup() }
+                    )
+                } else if tileSetupFeature == .today {
+                    ZestTodaySetupView(
+                        accentColor: accentColor,
+                        calendarSetupStep: $tileSetupCalendarStep,
+                        onFinished: { dismissTileSetup() }
+                    )
+                } else if tileSetupFeature == .battery {
+                    ZestBatterySetupView(
+                        accentColor: accentColor,
+                        onFinished: { dismissTileSetup() }
+                    )
+                } else if tileSetupFeature == .layoutFix {
+                    ZestLayoutFixSetupView(
+                        settingsManager: settingsManager,
+                        accentColor: accentColor
+                    )
+                }
+            }
+            .frame(maxWidth: 980, alignment: .top)
+        }
+    }
+
+    private var tileSetupTitle: String {
+        guard let feature = tileSetupFeature else { return "Feature Setup" }
+        if feature == .calendar || feature == .today {
+            return "Calendar & Today Setup"
+        }
+        return "\(feature.title) Setup"
+    }
+
+    private var rapidSymbolsSetupContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rapid Symbols inserts a symbol after one follow-up key. The HUD shows the active map whenever you arm the feature.")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            let mappings = ZestRapidSymbolEngine.shared.mappings
+            let order = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="]
+
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4),
+                spacing: 8
+            ) {
+                ForEach(order, id: \.self) { key in
+                    if let symbol = mappings[key] {
+                        HStack {
+                            Text(key)
+                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(symbol)
+                                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(height: 40)
+                        .background {
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(accentColor.opacity(0.08))
+                        }
+                    }
+                }
+            }
+
+            Text("Custom symbol maps will live here as this feature grows.")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+    }
+
     // MARK: - Configurable Action Setup
 
     private var unconfiguredActionSlots: Set<ZestSliceSlot> {
         Set(
             settingsManager.sliceAssignments.compactMap { slot, feature in
-                guard (feature == .openShortcut || feature == .runShortcut),
+                guard (feature == .openShortcut || feature == .runShortcut || feature == .url),
                       !settingsManager.isConfigured(feature, in: slot)
                 else { return nil }
                 return slot
@@ -725,6 +1038,19 @@ struct ZestSettingsView: View {
 
 
     private func presentActionSetup(feature: ZestFeature, slot: ZestSliceSlot) {
+        if layoutOnly && !onboardingLayoutMode {
+            NotificationCenter.default.post(
+                name: .zestSettingsSetupRequested,
+                object: nil,
+                userInfo: [
+                    "kind": "action",
+                    "feature": feature.rawValue,
+                    "slot": slot.rawValue
+                ]
+            )
+            return
+        }
+
         actionSetupFeature = feature
         actionSetupSlot = slot
         actionSetupVisible = false
@@ -735,11 +1061,25 @@ struct ZestSettingsView: View {
             selectedApplicationPath = settingsManager.applicationTargets[slot]?.path
                 ?? availableApplications.first?.path
                 ?? ""
-        } else {
+        } else if feature == .runShortcut {
             availableShortcuts = discoverShortcuts()
             selectedShortcutName = settingsManager.shortcutTargets[slot]?.name
                 ?? availableShortcuts.first
                 ?? ""
+        } else if feature == .url {
+            let target = ZestURLTargetStore.shared.target(for: slot.rawValue)
+            selectedURLName = target?.name ?? "Website"
+            selectedURLString = target?.urlString ?? "https://"
+            selectedURLAskBeforeOpening = target?.askBeforeOpening ?? false
+        }
+
+        if let kind = confirmationKind(for: feature) {
+            selectedActionRequiresConfirmation = ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                placementKey: "slice.\(slot.rawValue)",
+                kind: kind
+            )
+        } else {
+            selectedActionRequiresConfirmation = false
         }
 
         DispatchQueue.main.async {
@@ -751,6 +1091,20 @@ struct ZestSettingsView: View {
 
 
     private func presentCenterActionSetup(feature: ZestFeature, index: Int, count: Int) {
+        if layoutOnly && !onboardingLayoutMode {
+            NotificationCenter.default.post(
+                name: .zestSettingsSetupRequested,
+                object: nil,
+                userInfo: [
+                    "kind": "action",
+                    "feature": feature.rawValue,
+                    "centerIndex": index,
+                    "centerCount": count
+                ]
+            )
+            return
+        }
+
         actionSetupFeature = feature
         actionSetupSlot = nil
         actionSetupCenterIndex = index
@@ -761,9 +1115,22 @@ struct ZestSettingsView: View {
         if feature == .openShortcut {
             availableApplications = discoverApplications()
             selectedApplicationPath = settingsManager.centerApplicationTargets[key]?.path ?? availableApplications.first?.path ?? ""
-        } else {
+        } else if feature == .runShortcut {
             availableShortcuts = discoverShortcuts()
             selectedShortcutName = settingsManager.centerShortcutTargets[key]?.name ?? availableShortcuts.first ?? ""
+        } else if feature == .url {
+            let target = ZestURLTargetStore.shared.target(centerKey: key)
+            selectedURLName = target?.name ?? "Website"
+            selectedURLString = target?.urlString ?? "https://"
+            selectedURLAskBeforeOpening = target?.askBeforeOpening ?? false
+        }
+        if let kind = confirmationKind(for: feature) {
+            selectedActionRequiresConfirmation = ZestActionConfirmationPolicy.shared.requiresConfirmation(
+                placementKey: "center.\(key)",
+                kind: kind
+            )
+        } else {
+            selectedActionRequiresConfirmation = false
         }
         DispatchQueue.main.async { withAnimation(.easeInOut(duration: 0.22)) { actionSetupVisible = true } }
     }
@@ -792,19 +1159,83 @@ struct ZestSettingsView: View {
                 settingsManager.configureCenterApplication(app, count: count, index: index)
             } else if feature == .runShortcut, !selectedShortcutName.isEmpty {
                 settingsManager.configureCenterShortcut(ZestShortcutTarget(name: selectedShortcutName), count: count, index: index)
+            } else if feature == .url, isValidURLDraft {
+                settingsManager.configureCenterURL(
+                    ZestURLTarget(
+                        name: normalizedURLName,
+                        urlString: selectedURLString,
+                        browserBundleIdentifier: nil,
+                        askBeforeOpening: selectedURLAskBeforeOpening
+                    ),
+                    count: count,
+                    index: index
+                )
             } else { return }
         } else if let slot = actionSetupSlot {
             if feature == .openShortcut, let app = availableApplications.first(where: { $0.path == selectedApplicationPath }) {
                 settingsManager.configureApplication(app, for: slot)
             } else if feature == .runShortcut, !selectedShortcutName.isEmpty {
                 settingsManager.configureShortcut(ZestShortcutTarget(name: selectedShortcutName), for: slot)
+            } else if feature == .url, isValidURLDraft {
+                settingsManager.configureURL(
+                    ZestURLTarget(
+                        name: normalizedURLName,
+                        urlString: selectedURLString,
+                        browserBundleIdentifier: nil,
+                        askBeforeOpening: selectedURLAskBeforeOpening
+                    ),
+                    for: slot
+                )
             } else { return }
         } else { return }
+
+        if feature != .url,
+           let kind = confirmationKind(for: feature),
+           let placementKey = actionSetupConfirmationPlacementKey {
+            ZestActionConfirmationPolicy.shared.setRequiresConfirmation(
+                selectedActionRequiresConfirmation,
+                placementKey: placementKey,
+                kind: kind
+            )
+        }
 
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         dismissActionSetup()
     }
 
+
+    private func confirmationKind(for feature: ZestFeature) -> ZestActionKind? {
+        switch feature {
+        case .openShortcut: return .application
+        case .runShortcut: return .shortcut
+        case .url: return .url
+        default: return nil
+        }
+    }
+
+    private var actionSetupConfirmationPlacementKey: String? {
+        if let slot = actionSetupSlot {
+            return "slice.\(slot.rawValue)"
+        }
+        if let index = actionSetupCenterIndex, let count = actionSetupCenterCount {
+            return "center.\(settingsManager.centerActionKey(count: count, index: index))"
+        }
+        return nil
+    }
+
+    private var normalizedURLName: String {
+        let value = selectedURLName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty { return value }
+        if let host = URL(string: selectedURLString)?.host { return host }
+        return "Website"
+    }
+
+    private var isValidURLDraft: Bool {
+        let raw = selectedURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return false }
+        let candidate = raw.contains("://") ? raw : "https://\(raw)"
+        return URL(string: candidate)?.host != nil
+    }
 
     private func discoverApplications() -> [ZestApplicationTarget] {
         let roots = ["/Applications", "/System/Applications", NSHomeDirectory() + "/Applications"]
@@ -919,122 +1350,87 @@ struct ZestSettingsView: View {
 
 
     private var actionSetupOverlay: some View {
-        ZStack {
-            Rectangle()
-                .fill(AnyShapeStyle(.ultraThinMaterial))
-                .overlay(Color.black.opacity(onboardingLayoutMode ? 0.055 : 0.10))
-                .ignoresSafeArea()
-                .onTapGesture { }
-
-            VStack(spacing: 16) {
-                Image(
-                    systemName:
-                        actionSetupFeature == .openShortcut
-                        ? "arrow.up.forward.app"
-                        : "play.fill"
-                )
-                .font(.system(size: 32, weight: .semibold, design: .rounded))
-                .foregroundStyle(accentColor)
-
-                VStack(spacing: 5) {
-                    Text(
-                        actionSetupFeature == .openShortcut
-                        ? "Select an Application"
-                        : "Select a Shortcut"
-                    )
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
-
-                    Text(
-                        actionSetupFeature == .openShortcut
-                        ? "Choose the application this Zest tile should open."
-                        : "Choose the Apple Shortcut this Zest tile should run."
-                    )
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                }
-
+        ZestSettingsSetupWorkspace(
+            title: actionSetupTitle,
+            subtitle: actionSetupSubtitle,
+            systemImage: actionSetupSystemImage,
+            accentColor: accentColor,
+            onClose: { dismissActionSetup() },
+            onSave: { saveActionSetup() },
+            saveDisabled: (
+                actionSetupFeature == .openShortcut
+                ? selectedApplicationPath.isEmpty
+                : (actionSetupFeature == .url ? !isValidURLDraft : selectedShortcutName.isEmpty)
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 20) {
                 actionTargetSelector
-
-                HStack(spacing: 9) {
-                    Button {
-                        dismissActionSetup()
-                    } label: {
-                        Text("Cancel")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 38)
-                            .background {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .fill(Color.primary.opacity(0.045))
-                            }
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .stroke(Color.white.opacity(0.22), lineWidth: 0.7)
-                            }
-                    }
-                    .buttonStyle(ZestPressButtonStyle())
-                    .keyboardShortcut(.cancelAction)
-                    .focusable(false)
-
-                    Button {
-                        saveActionSetup()
-                    } label: {
-                        Text("Save")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 38)
-                            .background {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .fill(accentColor.opacity(0.82))
-                            }
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .stroke(Color.white.opacity(0.24), lineWidth: 0.7)
-                            }
-                    }
-                    .buttonStyle(ZestPressButtonStyle())
-                    .keyboardShortcut(.defaultAction)
-                    .focusable(false)
-                    .disabled(
-                        actionSetupFeature == .openShortcut
-                        ? selectedApplicationPath.isEmpty
-                        : selectedShortcutName.isEmpty
-                    )
-                }
-                .frame(width: 390)
             }
-            .padding(.horizontal, 34)
-            .padding(.vertical, 28)
-            .frame(width: 560)
-            .background {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(Color.clear)
-                    .glassEffect(
-                        .regular.tint(accentColor.opacity(0.10)),
-                        in: RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    )
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(Color.white.opacity(0.32), lineWidth: 0.8)
-            }
-            .shadow(color: .black.opacity(0.18), radius: 28, y: 12)
+            .frame(maxWidth: 980, alignment: .top)
         }
-        // In onboarding this editor is embedded inside the setup page. Expand
-        // the material scrim beyond the editor's own bounds so application /
-        // Shortcut selection blurs the complete onboarding window rather than
-        // producing a cropped rectangular blur.
-        .frame(
-            width: onboardingLayoutMode ? 1040 : nil,
-            height: onboardingLayoutMode ? 700 : nil
-        )
-        .offset(y: onboardingLayoutMode ? -52 : 0)
     }
 
+    private var actionSetupTitle: String {
+        switch actionSetupFeature {
+        case .openShortcut: return "Application Setup"
+        case .runShortcut: return "Shortcut Setup"
+        case .url: return "URL Setup"
+        default: return "Action Setup"
+        }
+    }
+
+    private var actionSetupSubtitle: String {
+        switch actionSetupFeature {
+        case .openShortcut: return "Choose the application this Zest tile should open."
+        case .runShortcut: return "Choose the Apple Shortcut this Zest tile should run."
+        case .url: return "Choose the link this Zest tile should open."
+        default: return "Configure this Zest action."
+        }
+    }
+
+    private var actionSetupSystemImage: String {
+        switch actionSetupFeature {
+        case .openShortcut: return "arrow.up.forward.app"
+        case .runShortcut: return "play.fill"
+        case .url: return "link"
+        default: return "slider.horizontal.3"
+        }
+    }
 
     @ViewBuilder
     private var actionTargetSelector: some View {
+        if actionSetupFeature == .url {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("TITLE")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    TextField("Website", text: $selectedURLName)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("URL")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    TextField("https://example.com", text: $selectedURLString)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Toggle("Ask before opening", isOn: $selectedURLAskBeforeOpening)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .padding(14)
+            .frame(maxWidth: 920)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.primary.opacity(0.035))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
+            }
+        } else {
         VStack(spacing: 8) {
             Button {
                 withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
@@ -1132,7 +1528,7 @@ struct ZestSettingsView: View {
                         .padding(12)
                     }
                 }
-                .frame(height: 230)
+                .frame(height: layoutOnly ? 230 : 390)
                 .background {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(Color.primary.opacity(0.035))
@@ -1143,8 +1539,17 @@ struct ZestSettingsView: View {
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
+
+            Toggle(
+                actionSetupFeature == .openShortcut ? "Ask before opening" : "Ask before running",
+                isOn: $selectedActionRequiresConfirmation
+            )
+            .font(.system(size: 11, weight: .medium))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
         }
-        .frame(width: 460)
+        .frame(maxWidth: 920)
+        }
     }
 
 
@@ -1543,7 +1948,7 @@ struct ZestSettingsView: View {
         // scroll view to compete for pointer deltas causes extra layout passes
         // and visible drag jitter. Freeze scrolling only for the active General
         // layout edit; Save/Cancel restores normal scrolling immediately.
-        .scrollDisabled(selectedSection == .general && settingsManager.isLayoutEditing)
+        .scrollDisabled(selectedSection == .general && layoutDragActive)
         .onScrollPhaseChange { _, phase in
             let active =
                 phase != .idle
@@ -1695,7 +2100,7 @@ struct ZestSettingsView: View {
                                     alignment: .leading,
                                     spacing: 10
                                 ) {
-                                    ForEach(ZestFeature.allCases.filter { $0 != .empty }) { feature in
+                                    ForEach(ZestFeature.allCases.filter { $0 != .empty && $0 != .rapidSymbols }) { feature in
                                         menuBarFeaturePalettePiece(feature)
                                     }
                                 }
@@ -1927,6 +2332,10 @@ struct ZestSettingsView: View {
                     )
 
                     formFactorCard(
+                        .turntable
+                    )
+
+                    formFactorCard(
                         .tripleSquare
                     )
                 }
@@ -1966,11 +2375,60 @@ struct ZestSettingsView: View {
                 )
                 .frame(
                     maxWidth: .infinity,
-                    minHeight: 340
+                    minHeight: settingsManager.formFactor == .orangeSlice ? 365 : 465
                 )
                 .allowsHitTesting(
                     !settingsScrollActive
                 )
+            }
+
+            settingsCard(
+                title: "Configured Features",
+                subtitle: "Edit setup for tiles that have their own data or display preferences."
+            ) {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+                    spacing: 10
+                ) {
+                    configurableFeatureButton(.calendar)
+                    configurableFeatureButton(.layoutFix)
+                    configurableFeatureButton(.battery)
+                }
+            }
+
+            settingsCard(
+                title: "View Accessibility",
+                subtitle: "Optional visibility helpers for Zest and its popup surfaces."
+            ) {
+                Toggle(isOn: $settingsManager.showCaretIndicator) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Show caret indicator", systemImage: "scope")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text(
+                            accessibilityService.isTrusted
+                            ? "Show the small Zest marker at the text insertion point."
+                            : "Requires Accessibility access to follow the active text caret."
+                        )
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: settingsManager.showCaretIndicator) { _, enabled in
+                    guard enabled, !accessibilityService.isTrusted else { return }
+                    accessibilityService.requestAccess()
+                }
+
+                Divider().opacity(0.40)
+
+                Toggle(isOn: $settingsManager.increaseVisibility) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Increase visibility", systemImage: "circle.lefthalf.filled")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text("Use denser, higher-contrast surfaces for Zest popups while keeping the same layout and animations.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
     }
@@ -2135,6 +2593,14 @@ struct ZestSettingsView: View {
                 )
             ) {
 
+                if factor == .turntable,
+                   !["language", "clockCalendar", "languageClock"].contains(settingsManager.centerOnlyPage) {
+                    settingsManager.centerOnlyPage = "language"
+                } else if factor == .centerOnly,
+                          !["clockThree", "calendarThree", "twoFeature", "fourFeature"].contains(settingsManager.centerOnlyPage) {
+                    settingsManager.centerOnlyPage = "clockThree"
+                }
+
                 settingsManager.formFactor =
                     factor
             }
@@ -2154,6 +2620,9 @@ struct ZestSettingsView: View {
 
                     case .orangeSlice:
                         miniSlicePreview
+
+                    case .turntable:
+                        miniTurntablePreview
 
                     case .tripleSquare:
                         miniTriplePreview
@@ -2250,101 +2719,45 @@ struct ZestSettingsView: View {
 
 
     private var miniCenterPreview: some View {
-        ZStack {
-            Capsule()
-                .fill(settingsManager.accentDeepColor.opacity(0.055))
-                .frame(width: 104, height: 31)
-                .glassEffect(.regular.tint(accentColor.opacity(0.12)), in: Capsule())
-                .overlay {
-                    Capsule().stroke(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.58),
-                                accentColor.opacity(0.18),
-                                settingsManager.accentDeepColor.opacity(0.16)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.75
-                    )
-                }
-
-            HStack(spacing: 70) {
-                Image(systemName: "chevron.left")
-                Image(systemName: "chevron.right")
-            }
-            .font(.system(size: 7, weight: .bold))
-            .foregroundStyle(Color.primary.opacity(0.66))
-
-            Circle()
-                .fill(settingsManager.accentDeepColor.opacity(0.045))
-                .frame(width: 77, height: 77)
-
-            Color.clear
-                .frame(width: 74, height: 74)
-                .glassEffect(.regular.tint(accentColor.opacity(0.26)), in: Circle())
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            Color.white.opacity(0.16),
-                            settingsManager.accentHighlightColor.opacity(0.12),
-                            Color.clear
-                        ],
-                        center: UnitPoint(x: 0.30, y: 0.18),
-                        startRadius: 0,
-                        endRadius: 42
-                    )
-                )
-                .frame(width: 74, height: 74)
-
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.90),
-                            Color.white.opacity(0.28),
-                            accentColor.opacity(0.18)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.9
-                )
-                .frame(width: 74, height: 74)
-
-            Text("EN")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .offset(y: -21)
-
-            ZStack {
-                Circle()
-                    .fill(settingsManager.accentDeepColor.opacity(0.08))
-                    .frame(width: 29, height: 29)
-
-                Color.clear
-                    .frame(width: 25, height: 25)
-                    .glassEffect(.regular.tint(accentColor.opacity(0.25)), in: Circle())
-
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 8.5, weight: .semibold))
-            }
-
-            Text("A   B   C")
-                .font(.system(size: 4.2, weight: .semibold, design: .rounded))
-                .offset(y: 23)
-                .opacity(0.72)
-        }
-        .foregroundStyle(Color.primary.opacity(0.82))
+        ZestV34CenterOnlyTopThreeView(
+            features: [.clipboard, .emoji, .symbols],
+            featureColors: [accentColor, accentColor, accentColor],
+            displayKind: .clock,
+            accentColor: accentColor,
+            accentBrightColor: settingsManager.accentBrightColor,
+            accentHighlightColor: settingsManager.accentHighlightColor,
+            accentDeepColor: settingsManager.accentDeepColor,
+            diameter: 74,
+            onFeature: { _, _ in },
+            onSettings: {}
+        )
+        .allowsHitTesting(false)
         .shadow(color: .black.opacity(0.11), radius: 4, y: 2)
+    }
+
+    private var miniTurntablePreview: some View {
+        ZestV34CenterOnlyLanguageTurntable(
+            accentColor: accentColor,
+            accentBrightColor: settingsManager.accentBrightColor,
+            accentHighlightColor: settingsManager.accentHighlightColor,
+            accentDeepColor: settingsManager.accentDeepColor,
+            rearGlassPrimaryColor: settingsManager.rearGlassPrimaryColor,
+            rearGlassBrightColor: settingsManager.rearGlassBrightColor,
+            shortLabel: "EN",
+            sourceName: "ABC",
+            onPrevious: {},
+            onNext: {},
+            onSettings: {}
+        )
+        .scaleEffect(0.86)
+        .allowsHitTesting(false)
+        .frame(width: 154, height: 82)
     }
 
     private var miniSlicePreview:
         some View {
 
-        ZestMiniSlicePreview(
+        ZestV34MiniSlicePreview(
             accentColor:
                 accentColor,
             accentHighlightColor:
@@ -2402,6 +2815,13 @@ struct ZestSettingsView: View {
                                 Image(systemName: "plus")
                                     .font(.system(size: 10, weight: .bold))
                                     .opacity(0.35)
+                            } else if feature == .today {
+                                ZestNokiaTodaySquareFace(
+                                    accentColor: accentColor,
+                                    accentHighlightColor: settingsManager.accentHighlightColor,
+                                    accentDeepColor: settingsManager.accentDeepColor,
+                                    size: 43
+                                )
                             } else {
                                 Image(systemName: feature.systemImage)
                                     .font(.system(size: 15, weight: .semibold))
@@ -2467,58 +2887,185 @@ struct ZestSettingsView: View {
         CGFloat = 118
 
 
-    private var featureLibrary:
-        some View {
-
-        VStack(
-            alignment: .leading,
-            spacing: 12
-        ) {
-
-            HStack {
-                Text("Available Pieces")
-                    .font(
-                        .system(
-                            size: 12,
-                            weight: .semibold
-                        )
-                    )
-
-                Spacer()
-            }
-
-
-            LazyVGrid(
-                columns: Array(
-                    repeating: GridItem(
-                        .fixed(loosePieceCell),
-                        spacing: 4
-                    ),
-                    count: 4
-                ),
-                alignment: .leading,
-                spacing: 8
-            ) {
-
-                ForEach(
-                    Array(
-                        ZestFeature
-                            .allCases
-                            .filter { $0 != .empty }
-                            .enumerated()
-                    ),
-                    id: \.element.id
-                ) { index, feature in
-
-                    physicalFeaturePiece(
-                        feature,
-                        libraryIndex: index
-                    )
-                }
-            }
-        }
+    private var featureLibraryGroups: [ZestFeatureLibraryGroup] {
+        [
+            ZestFeatureLibraryGroup(id: "text", title: "Text", features: [.size, .font]),
+            ZestFeatureLibraryGroup(id: "content", title: "Content", features: [.clipboard, .emoji, .symbols]),
+            ZestFeatureLibraryGroup(id: "productivity", title: "Productivity", features: [.calendar, .today, .battery, .layoutFix]),
+            ZestFeatureLibraryGroup(id: "actions", title: "Actions", features: [.openShortcut, .runShortcut, .url]),
+            ZestFeatureLibraryGroup(id: "system", title: "System", features: [.settings])
+        ]
     }
 
+    private var featureLibrary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Available Pieces")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(colorScheme == .light ? 0.72 : 0.10),
+                                accentColor.opacity(colorScheme == .light ? 0.075 : 0.055),
+                                Color.white.opacity(colorScheme == .light ? 0.48 : 0.055)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .glassEffect(
+                        .regular.tint(accentColor.opacity(colorScheme == .light ? 0.045 : 0.065)),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(colorScheme == .light ? 0.66 : 0.16), lineWidth: 0.8)
+                    }
+
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(featureLibraryGroups) { group in
+                            let collapsed = collapsedFeatureGroups.contains(group.id)
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 10) {
+                                    Button {
+                                        withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                                            if collapsed {
+                                                collapsedFeatureGroups.remove(group.id)
+                                            } else {
+                                                collapsedFeatureGroups.insert(group.id)
+                                            }
+                                        }
+                                    } label: {
+                                        ZStack {
+                                            Circle()
+                                                .fill(
+                                                    LinearGradient(
+                                                        colors: [
+                                                            Color.white.opacity(colorScheme == .light ? 0.82 : 0.11),
+                                                            accentColor.opacity(0.09)
+                                                        ],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    )
+                                                )
+                                                .frame(width: 31, height: 31)
+                                                .glassEffect(.regular.tint(accentColor.opacity(0.07)), in: Circle())
+                                            Circle()
+                                                .stroke(Color.white.opacity(colorScheme == .light ? 0.78 : 0.20), lineWidth: 0.8)
+                                                .frame(width: 31, height: 31)
+                                            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                                                .font(.system(size: 9.5, weight: .bold))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .contentShape(Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .focusable(false)
+
+                                    Text(group.title)
+                                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+
+                                    Spacer()
+
+                                    Text("\(group.features.count)")
+                                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.tertiary)
+                                }
+
+                                if !collapsed {
+                                    LazyVGrid(
+                                        columns: Array(
+                                            repeating: GridItem(.fixed(loosePieceCell), spacing: 6),
+                                            count: 4
+                                        ),
+                                        alignment: .center,
+                                        spacing: 9
+                                    ) {
+                                        ForEach(Array(group.features.enumerated()), id: \.element.id) { index, feature in
+                                            physicalFeaturePiece(feature, libraryIndex: index)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+                            }
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 9)
+                            .background {
+                                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                    .fill(
+                                        colorScheme == .light
+                                        ? Color.white.opacity(0.50)
+                                        : Color.primary.opacity(0.024)
+                                    )
+                                    .glassEffect(
+                                        .regular.tint(accentColor.opacity(0.045)),
+                                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                    )
+                            }
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                    .stroke(
+                                        Color.white.opacity(colorScheme == .light ? 0.58 : 0.11),
+                                        lineWidth: 0.75
+                                    )
+                            }
+                            .shadow(
+                                color: Color.black.opacity(colorScheme == .light ? 0.095 : 0.18),
+                                radius: collapsed ? 3 : 6,
+                                x: 0,
+                                y: collapsed ? 1 : 3
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 13)
+                }
+                .scrollIndicators(.hidden)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                // "Physical ad board" depth: cards disappear beneath soft upper
+                // and lower shadow lips instead of simply being clipped by a
+                // sterile scroll rectangle.
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(colorScheme == .light ? 0.13 : 0.25),
+                            Color.black.opacity(0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 18)
+
+                    Spacer(minLength: 0)
+
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0),
+                            Color.black.opacity(colorScheme == .light ? 0.12 : 0.24)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 18)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .allowsHitTesting(false)
+            }
+            .frame(height: 310)
+        }
+    }
 
     private func physicalFeaturePiece(
         _ feature: ZestFeature,
@@ -2538,7 +3085,7 @@ struct ZestSettingsView: View {
                 )
                 .overlay {
 
-                    ZestLiquidGlassWedgePiece(
+                    ZestV34LiquidGlassWedgePiece(
                         accentColor: accentColor,
                         accentHighlightColor:
                             settingsManager.accentHighlightColor,
@@ -2587,6 +3134,10 @@ struct ZestSettingsView: View {
                             if draggedSliceFeature != feature {
                                 draggedSliceFeature = feature
                                 isDraggingSlicePiece = true
+                                NotificationCenter.default.post(
+                                    name: .zestLayoutDragStateChanged,
+                                    object: true
+                                )
                             }
 
                             let dx = value.location.x - draggedSliceLocation.x
@@ -2656,6 +3207,10 @@ struct ZestSettingsView: View {
                         draggedSliceFeature = nil
                         magneticSliceSlot = nil
                         isDraggingSlicePiece = false
+                        NotificationCenter.default.post(
+                            name: .zestLayoutDragStateChanged,
+                            object: false
+                        )
                     }
                 )
 
@@ -2679,6 +3234,56 @@ struct ZestSettingsView: View {
             height: loosePieceCell + 14,
             alignment: .top
         )
+        .overlay(alignment: .topTrailing) {
+            if feature == .size || feature == .font || feature == .today {
+                Button {
+                    pagesOnlyInfoFeature = feature
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(accentColor)
+                        .frame(width: 24, height: 24)
+                        .background {
+                            Circle()
+                                .fill(Color.white.opacity(0.08))
+                                .glassEffect(.regular.tint(accentColor.opacity(0.06)), in: Circle())
+                        }
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .offset(x: -4, y: 4)
+                .popover(
+                    isPresented: Binding(
+                        get: { pagesOnlyInfoFeature == feature },
+                        set: { showing in
+                            if !showing && pagesOnlyInfoFeature == feature {
+                                pagesOnlyInfoFeature = nil
+                            }
+                        }
+                    ),
+                    arrowEdge: .top
+                ) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            feature == .today ? "Nokia Clock" : "Pages support",
+                            systemImage: feature == .today ? "clock" : feature.systemImage
+                        )
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(accentColor)
+
+                        Text(
+                            feature == .today
+                            ? "This tile shows the current time. Click it in Zest to open Today view."
+                            : "\(feature.title) is currently supported in Pages only."
+                        )
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .frame(width: 250, alignment: .leading)
+                }
+            }
+        }
     }
 
 
@@ -2698,7 +3303,7 @@ struct ZestSettingsView: View {
         Double {
 
         let nativeAngle =
-            ZestSliceVisualSlot
+            ZestV34SliceVisualSlot
                 .all[0]
                 .centerAngle
 
@@ -2733,7 +3338,7 @@ struct ZestSettingsView: View {
 
 
         for visualSlot in
-            ZestSliceVisualSlot.all {
+            ZestV34SliceVisualSlot.all {
 
             let radians =
                 visualSlot.centerAngle
@@ -2816,7 +3421,7 @@ struct ZestSettingsView: View {
             / Double.pi
 
         let nativeAngle =
-            ZestSliceVisualSlot
+            ZestV34SliceVisualSlot
                 .all[0]
                 .centerAngle
 
@@ -2832,7 +3437,7 @@ struct ZestSettingsView: View {
         guard
             let slot,
             let visualSlot =
-                ZestSliceVisualSlot.all
+                ZestV34SliceVisualSlot.all
                     .first(
                         where: {
                             $0.settingsSlot
@@ -2847,7 +3452,7 @@ struct ZestSettingsView: View {
 
 
         let nativeAngle =
-            ZestSliceVisualSlot
+            ZestV34SliceVisualSlot
                 .all[0]
                 .centerAngle
 
@@ -2862,7 +3467,7 @@ struct ZestSettingsView: View {
         rotation: Double
     ) -> CGPoint {
 
-        // ZestLiquidGlassWedgePiece is drawn inside a square reference
+        // ZestV34LiquidGlassWedgePiece is drawn inside a square reference
         // canvas, but the visible wedge is not centered in that square.
         // Putting the square's center on the pointer therefore leaves the
         // actual tile roughly 90 pt away from the cursor.
@@ -2877,7 +3482,7 @@ struct ZestSettingsView: View {
             * scale
 
         let nativeCenterAngle =
-            ZestSliceVisualSlot
+            ZestV34SliceVisualSlot
                 .all[0]
                 .centerAngle
 
@@ -2914,7 +3519,7 @@ struct ZestSettingsView: View {
                 )
 
 
-            ZestLiquidGlassWedgePiece(
+            ZestV34LiquidGlassWedgePiece(
                 accentColor:
                     accentColor,
                 accentHighlightColor:
@@ -2977,7 +3582,7 @@ struct ZestSettingsView: View {
 
         switch settingsManager.formFactor {
 
-        case .centerOnly:
+        case .centerOnly, .turntable:
             centerLayoutEditor
 
         case .orangeSlice:
@@ -2991,7 +3596,12 @@ struct ZestSettingsView: View {
 
     // MARK: Center-Only Editor
 
-    private let centerOnlyModes = ["language", "twoFeature", "fourFeature"]
+    private var centerOnlyModes: [String] {
+        if settingsManager.formFactor == .turntable {
+            return ["language", "clockCalendar", "languageClock"]
+        }
+        return ["clockThree", "calendarThree", "twoFeature", "fourFeature"]
+    }
 
     private var centerOnlySelectionIndex: Int {
         get { centerOnlyModes.firstIndex(of: settingsManager.centerOnlyPage) ?? 0 }
@@ -2999,6 +3609,10 @@ struct ZestSettingsView: View {
 
     private var centerOnlyHeading: String {
         switch settingsManager.centerOnlyPage {
+        case "clockCalendar": return "Clock & Calendar"
+        case "languageClock": return "Language + Clock"
+        case "calendarThree": return "Calendar + 3"
+        case "clockThree": return "Clock + 3"
         case "twoFeature": return "2 Features"
         case "fourFeature": return "4 Features"
         default: return "Language Switcher"
@@ -3007,14 +3621,164 @@ struct ZestSettingsView: View {
 
     private var centerOnlySubtitle: String {
         switch settingsManager.centerOnlyPage {
+        case "clockCalendar": return "One CRT face with drag and Clock/Calendar controls."
+        case "languageClock": return "Language rotates behind a fixed Nokia-style clock display."
+        case "calendarThree": return "A fixed calendar plate above three assignable actions."
+        case "clockThree": return "A fixed clock plate above three assignable actions."
         case "twoFeature": return "Split the ring horizontally between two actions."
         case "fourFeature": return "Four actions arranged around the center settings control."
         default: return "Switch between your enabled keyboard input sources."
         }
     }
 
+    private var centerOnlyModeHasAssignableTiles: Bool {
+        ["calendarThree", "clockThree", "twoFeature", "fourFeature"].contains(settingsManager.centerOnlyPage)
+    }
+
     private var centerOnlyAssignableFeatures: [ZestFeature] {
-        [.size, .font, .clipboard, .emoji, .symbols, .openShortcut, .runShortcut]
+        [.size, .font, .clipboard, .emoji, .symbols, .calendar, .battery, .layoutFix, .openShortcut, .runShortcut, .url]
+    }
+
+    private func centerFeatureBankFeatures(for tab: String) -> [ZestFeature] {
+        compactFeatureBankFeatures(for: tab).filter { $0 != .today }
+    }
+
+    private func centerFeatureBankColumnCount(for tab: String) -> Int {
+        max(1, min(7, centerFeatureBankFeatures(for: tab).count))
+    }
+
+    private var compactFeatureBankGroups: [ZestFeatureLibraryGroup] {
+        [
+            ZestFeatureLibraryGroup(id: "text", title: "Text", features: [.size, .font]),
+            ZestFeatureLibraryGroup(id: "content", title: "Content", features: [.clipboard, .emoji, .symbols]),
+            ZestFeatureLibraryGroup(id: "productivity", title: "Productivity", features: [.calendar, .today, .battery, .layoutFix]),
+            ZestFeatureLibraryGroup(id: "actions", title: "Actions", features: [.openShortcut, .runShortcut, .url])
+        ]
+    }
+
+    private func compactFeatureBankFeatures(for tab: String) -> [ZestFeature] {
+        compactFeatureBankGroups.first(where: { $0.id == tab })?.features ?? []
+    }
+
+    // Build only as many physical columns as the selected category needs.
+    // Keeping the seven-column cap preserves the existing two-row behaviour,
+    // while short categories (for example Size + Font) sit in the true centre
+    // instead of occupying the first two cells of an invisible seven-column grid.
+    private func compactFeatureBankColumnCount(for tab: String) -> Int {
+        max(1, min(7, compactFeatureBankFeatures(for: tab).count))
+    }
+
+    private func compactFeatureBankWidth(for tab: String) -> CGFloat {
+        let columns = compactFeatureBankColumnCount(for: tab)
+        let tileWidth: CGFloat = 82
+        let spacing: CGFloat = 8
+        return CGFloat(columns) * tileWidth
+            + CGFloat(max(columns - 1, 0)) * spacing
+    }
+
+    private func compactFeatureBankTabs(selection: Binding<String>) -> some View {
+        HStack(spacing: 5) {
+            ForEach(compactFeatureBankGroups) { group in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        selection.wrappedValue = group.id
+                    }
+                } label: {
+                    Text(group.title)
+                        .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                        .foregroundStyle(selection.wrappedValue == group.id ? Color.primary : Color.secondary)
+                        .padding(.horizontal, 11)
+                        .frame(height: 25)
+                        .background {
+                            Capsule()
+                                .fill(selection.wrappedValue == group.id ? accentColor.opacity(0.12) : Color.primary.opacity(0.035))
+                        }
+                        .overlay {
+                            Capsule()
+                                .stroke(
+                                    selection.wrappedValue == group.id ? accentColor.opacity(0.28) : Color.primary.opacity(0.08),
+                                    lineWidth: 0.7
+                                )
+                        }
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func compactPagesOnlyInfoButton(_ feature: ZestFeature) -> some View {
+        if feature == .size || feature == .font || feature == .today {
+            Button {
+                pagesOnlyInfoFeature = feature
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(accentColor)
+                    .frame(width: 19, height: 19)
+                    .background {
+                        Circle()
+                            .fill(Color.white.opacity(colorScheme == .light ? 0.58 : 0.08))
+                            .glassEffect(.regular.tint(accentColor.opacity(0.06)), in: Circle())
+                    }
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .popover(
+                isPresented: Binding(
+                    get: { pagesOnlyInfoFeature == feature },
+                    set: { showing in
+                        if !showing && pagesOnlyInfoFeature == feature {
+                            pagesOnlyInfoFeature = nil
+                        }
+                    }
+                ),
+                arrowEdge: .top
+            ) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(
+                        feature == .today ? "Nokia Clock" : "Pages support",
+                        systemImage: feature == .today ? "clock" : feature.systemImage
+                    )
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(accentColor)
+
+                    Text(
+                        feature == .today
+                        ? "This tile shows the current time. Click it in Zest to open Today view."
+                        : "\(feature.title) is currently supported in Pages only."
+                    )
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .frame(width: 250, alignment: .leading)
+            }
+        }
+    }
+
+    private var compactBankBackground: some View {
+        RoundedRectangle(cornerRadius: 17, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(colorScheme == .light ? 0.52 : 0.055),
+                        accentColor.opacity(colorScheme == .light ? 0.055 : 0.07)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .glassEffect(
+                .regular.tint(accentColor.opacity(0.055)),
+                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .stroke(Color.white.opacity(colorScheme == .light ? 0.56 : 0.13), lineWidth: 0.75)
+            }
+            .shadow(color: .black.opacity(colorScheme == .light ? 0.08 : 0.16), radius: 6, y: 3)
     }
 
     private func centerOnlyFeatureIcon(_ feature: ZestFeature) -> String {
@@ -3053,43 +3817,84 @@ struct ZestSettingsView: View {
             }
             .padding(.top, 18)
 
-            if settingsManager.centerOnlyPage != "language" {
-                HStack(spacing: 7) {
-                    ForEach(centerOnlyAssignableFeatures) { feature in
-                        VStack(spacing: 3) {
-                            Image(systemName: centerOnlyFeatureIcon(feature))
-                                .font(.system(size: 14, weight: .semibold))
-                            Text(feature.title)
-                                .font(.system(size: 7.5, weight: .bold, design: .rounded))
-                        }
-                        .foregroundStyle(Color.primary.opacity(0.80))
-                        .frame(width: 48, height: 42)
-                        .background {
-                            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                .fill(Color.primary.opacity(0.035))
-                                .glassEffect(.regular.tint(accentColor.opacity(0.10)), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        }
-                        .onDrag {
-                            centerOnlyDraggedFeature = feature
-                            centerOnlyDraggedSourceIndex = nil
-                            return NSItemProvider(object: feature.rawValue as NSString)
-                        } preview: {
-                            centerOnlyBankDragPreview(feature)
+            if centerOnlyModeHasAssignableTiles {
+                VStack(spacing: 11) {
+                    compactFeatureBankTabs(selection: $centerFeatureBankTab)
+
+                    LazyVGrid(
+                        columns: Array(
+                            repeating: GridItem(.fixed(82), spacing: 8),
+                            count: centerFeatureBankColumnCount(for: centerFeatureBankTab)
+                        ),
+                        alignment: .center,
+                        spacing: 8
+                    ) {
+                        ForEach(centerFeatureBankFeatures(for: centerFeatureBankTab)) { feature in
+                            VStack(spacing: 3) {
+                                Image(systemName: centerOnlyFeatureIcon(feature))
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .frame(height: 18)
+
+                                Text(feature.title)
+                                    .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                    .minimumScaleFactor(0.76)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 18, alignment: .center)
+                            }
+                            .foregroundStyle(Color.primary.opacity(0.80))
+                            .frame(width: 82, height: 52, alignment: .center)
+                            .background {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(Color.primary.opacity(0.035))
+                                    .glassEffect(
+                                        .regular.tint(accentColor.opacity(0.10)),
+                                        in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    )
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                compactPagesOnlyInfoButton(feature)
+                                    .offset(x: 4, y: -5)
+                            }
+                            .onDrag {
+                                centerOnlyDraggedFeature = feature
+                                centerOnlyDraggedSourceIndex = nil
+                                return NSItemProvider(object: feature.rawValue as NSString)
+                            } preview: {
+                                centerOnlyBankDragPreview(feature)
+                            }
                         }
                     }
+                    .frame(
+                        width: compactFeatureBankWidth(for: centerFeatureBankTab),
+                        alignment: .center
+                    )
+                    .frame(maxWidth: 700, alignment: .center)
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 13)
+                .frame(maxWidth: 730, minHeight: 132, alignment: .top)
+                .background { compactBankBackground }
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
+                // Give the 2/4 editor a little breathing room below the bank so
+                // its rounded surface does not visually collide with the card edge.
+                .padding(.bottom, 12)
             }
         }
         .padding(.horizontal, 8)
-        .frame(height: 382, alignment: .top)
+        .frame(height: 462, alignment: .top)
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 8) {
-                if settingsManager.centerOnlyPage != "language" {
+                if centerOnlyModeHasAssignableTiles {
                     Button {
                         beginLayoutEditIfNeeded()
-                        if settingsManager.centerOnlyPage == "twoFeature" { settingsManager.centerOnlyTwoFeatures = [.empty, .empty] }
-                        else { settingsManager.centerOnlyFourFeatures = [.empty, .empty, .empty, .empty] }
+                        switch settingsManager.centerOnlyPage {
+                        case "twoFeature": settingsManager.centerOnlyTwoFeatures = [.empty, .empty]
+                        case "fourFeature": settingsManager.centerOnlyFourFeatures = [.empty, .empty, .empty, .empty]
+                        case "calendarThree", "clockThree": settingsManager.centerOnlyThreeFeatures = [.empty, .empty, .empty]
+                        default: break
+                        }
                     } label: {
                         Label("Remove All", systemImage: "square.stack.3d.up.slash")
                             .font(.system(size: 9, weight: .bold))
@@ -3131,38 +3936,228 @@ struct ZestSettingsView: View {
     }
 
     private var centerOnlySetupRing: some View {
-        // Language keeps the compact dial. The 2/4 feature editors get
-        // 20% more surface area so the sectors read as real controls.
-        let diameter: CGFloat = settingsManager.centerOnlyPage == "language" ? 204 : 245
+        let compactFace = ["language", "clockCalendar", "languageClock"].contains(settingsManager.centerOnlyPage)
+        let diameter: CGFloat = compactFace ? 204 : 245
 
-        return ZStack {
-            if settingsManager.centerOnlyPage == "language" {
-                centerOnlyLanguageBacking(diameter: diameter)
-                centerOnlyLanguageWing(systemImage: "chevron.left", side: -1)
-                    .offset(x: -(diameter / 2 + 23))
-                centerOnlyLanguageWing(systemImage: "chevron.right", side: 1)
-                    .offset(x: diameter / 2 + 23)
-            }
+        return Group {
+            switch settingsManager.centerOnlyPage {
+            case "clockCalendar":
+                ZestV34CenterOnlyClockCalendarTurntable(
+                    accentColor: accentColor,
+                    accentBrightColor: settingsManager.accentBrightColor,
+                    accentHighlightColor: settingsManager.accentHighlightColor,
+                    accentDeepColor: settingsManager.accentDeepColor,
+                    rearGlassPrimaryColor: settingsManager.rearGlassPrimaryColor,
+                    rearGlassBrightColor: settingsManager.rearGlassBrightColor,
+                    showsCalendar: centerOnlyClockCalendarShowsCalendar,
+                    faceRotation: centerOnlyClockCalendarRotation,
+                    faceOpacity: centerOnlyClockCalendarOpacity,
+                    diameter: diameter,
+                    onToggle: {
+                        let direction = centerOnlyClockCalendarShowsCalendar ? -1 : 1
+                        animateSettingsClockCalendarChange(direction: direction) {
+                            centerOnlyClockCalendarShowsCalendar.toggle()
+                        }
+                    },
+                    onSettings: {},
+                    onDragChanged: nil
+                )
 
-            centerOnlyPhysicalRing(diameter: diameter)
+            case "languageClock":
+                ZestV35LanguageClockTurntable(
+                    accentColor: accentColor,
+                    accentBrightColor: settingsManager.accentBrightColor,
+                    accentHighlightColor: settingsManager.accentHighlightColor,
+                    accentDeepColor: settingsManager.accentDeepColor,
+                    rearGlassPrimaryColor: settingsManager.rearGlassPrimaryColor,
+                    rearGlassBrightColor: settingsManager.rearGlassBrightColor,
+                    shortLabel: ["EN", "DE", "UA"][turntableLanguageIndex % 3],
+                    languageRotation: turntableLanguageRotation,
+                    languageOpacity: turntableLanguageOpacity,
+                    diameter: diameter,
+                    onRotateLanguage: {
+                        animateSettingsTurntableLanguageChange {
+                            turntableLanguageIndex = (turntableLanguageIndex + 1) % 3
+                        }
+                    },
+                    onSettings: {},
+                    onDragChanged: nil
+                )
 
-            Group {
-                switch settingsManager.centerOnlyPage {
-                case "twoFeature":
-                    centerOnlyFeatureDisk(features: settingsManager.centerOnlyTwoFeatures, count: 2, diameter: diameter)
-                case "fourFeature":
-                    centerOnlyFeatureDisk(features: settingsManager.centerOnlyFourFeatures, count: 4, diameter: diameter)
-                default:
-                    centerOnlyLanguagePreview(diameter: diameter)
+            case "calendarThree":
+                centerOnlyTopThreeSetupRing(kind: .calendar, diameter: diameter)
+
+            case "clockThree":
+                centerOnlyTopThreeSetupRing(kind: .clock, diameter: diameter)
+
+            default:
+                ZStack {
+                    if settingsManager.centerOnlyPage == "language" {
+                        centerOnlyLanguageBacking(diameter: diameter)
+                        centerOnlyLanguageWing(systemImage: "chevron.left", side: -1)
+                            .offset(x: -(diameter / 2 + 23))
+                        centerOnlyLanguageWing(systemImage: "chevron.right", side: 1)
+                            .offset(x: diameter / 2 + 23)
+                    }
+
+                    centerOnlyPhysicalRing(diameter: diameter)
+
+                    Group {
+                        switch settingsManager.centerOnlyPage {
+                        case "twoFeature":
+                            centerOnlyFeatureDisk(features: settingsManager.centerOnlyTwoFeatures, count: 2, diameter: diameter)
+                        case "fourFeature":
+                            centerOnlyFeatureDisk(features: settingsManager.centerOnlyFourFeatures, count: 4, diameter: diameter)
+                        default:
+                            centerOnlyLanguagePreview(diameter: diameter)
+                        }
+                    }
                 }
             }
-            .id(settingsManager.centerOnlyPage)
-            .transition(.opacity.combined(with: .scale(scale: 0.96)))
         }
         .frame(width: diameter, height: diameter)
+        .id(settingsManager.centerOnlyPage)
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
         .animation(.spring(response: 0.34, dampingFraction: 0.80), value: settingsManager.centerOnlyPage)
         .shadow(color: .black.opacity(0.14), radius: 8, y: 5)
         .shadow(color: accentColor.opacity(0.10), radius: 10)
+    }
+
+    private func animateSettingsTurntableLanguageChange(
+        change: @escaping () -> Void
+    ) {
+        let exitAngle = 54.0
+        let entryAngle = -54.0
+
+        withAnimation(.easeIn(duration: 0.10)) {
+            turntableLanguageRotation = exitAngle
+            turntableLanguageOpacity = 0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            change()
+            turntableLanguageRotation = entryAngle
+            withAnimation(.easeOut(duration: 0.15)) {
+                turntableLanguageRotation = 0
+                turntableLanguageOpacity = 1
+            }
+        }
+    }
+
+    private func animateSettingsClockCalendarChange(
+        direction: Int,
+        change: @escaping () -> Void
+    ) {
+        let exitAngle = direction > 0 ? 54.0 : -54.0
+        let entryAngle = -exitAngle
+
+        withAnimation(.easeIn(duration: 0.10)) {
+            centerOnlyClockCalendarRotation = exitAngle
+            centerOnlyClockCalendarOpacity = 0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            change()
+            centerOnlyClockCalendarRotation = entryAngle
+            withAnimation(.easeOut(duration: 0.15)) {
+                centerOnlyClockCalendarRotation = 0
+                centerOnlyClockCalendarOpacity = 1
+            }
+        }
+    }
+
+    private func centerOnlyTopThreeSetupRing(
+        kind: ZestV34CenterTopDisplayKind,
+        diameter: CGFloat
+    ) -> some View {
+        ZestV34CenterOnlyTopThreeView(
+            features: settingsManager.centerOnlyThreeFeatures,
+            featureColors: (0..<3).map { settingsManager.accentColor(at: $0) },
+            displayKind: kind,
+            accentColor: accentColor,
+            accentBrightColor: settingsManager.accentBrightColor,
+            accentHighlightColor: settingsManager.accentHighlightColor,
+            accentDeepColor: settingsManager.accentDeepColor,
+            diameter: diameter,
+            onFeature: { _, _ in },
+            onSettings: {}
+        )
+        .overlay {
+            ZStack {
+                ForEach(0..<3, id: \.self) { index in
+                    let feature = settingsManager.centerOnlyThreeFeatures[index]
+                    CenterOnlyBottomThirdDropShape(index: index)
+                        .fill(Color.clear)
+                        .contentShape(CenterOnlyBottomThirdDropShape(index: index))
+                        .onDrag {
+                            guard feature != .empty else { return NSItemProvider() }
+                            centerOnlyDraggedFeature = feature
+                            centerOnlyDraggedSourceIndex = index
+                            return NSItemProvider(object: feature.rawValue as NSString)
+                        } preview: {
+                            centerOnlyBankDragPreview(feature)
+                        }
+                        .onDrop(
+                            of: [UTType.text],
+                            isTargeted: Binding(
+                                get: { centerOnlyMagneticTargetIndex == index },
+                                set: { targeted in
+                                    withAnimation(.easeOut(duration: 0.12)) {
+                                        if targeted {
+                                            centerOnlyMagneticTargetIndex = index
+                                        } else if centerOnlyMagneticTargetIndex == index {
+                                            centerOnlyMagneticTargetIndex = nil
+                                        }
+                                    }
+                                }
+                            )
+                        ) { providers in
+                            guard !providers.isEmpty else { return false }
+                            centerOnlyCommitDrop(targetIndex: index, count: 3)
+                            centerOnlyMagneticTargetIndex = nil
+                            centerOnlyDraggedFeature = nil
+                            centerOnlyDraggedSourceIndex = nil
+                            return true
+                        }
+                }
+
+                if let target = centerOnlyMagneticTargetIndex,
+                   target >= 0, target < 3,
+                   let feature = centerOnlyDraggedFeature {
+                    CenterOnlyBottomThirdDropShape(index: target)
+                        .fill(accentColor.opacity(0.15))
+                        .glassEffect(
+                            .regular.tint(accentColor.opacity(0.16)),
+                            in: CenterOnlyBottomThirdDropShape(index: target)
+                        )
+                        .overlay {
+                            CenterOnlyBottomThirdDropShape(index: target)
+                                .stroke(Color.white.opacity(0.70), lineWidth: 1.1)
+                        }
+                        .overlay {
+                            centerOnlyTopThreePreviewIcon(feature, index: target, diameter: diameter)
+                        }
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(width: diameter, height: diameter)
+            .clipShape(Circle())
+        }
+    }
+
+    private func centerOnlyTopThreePreviewIcon(
+        _ feature: ZestFeature,
+        index: Int,
+        diameter: CGFloat
+    ) -> some View {
+        let angles: [Double] = [145, 90, 35]
+        let radians = angles[index] * Double.pi / 180
+        let radius = diameter * 0.32
+
+        return Image(systemName: centerOnlyFeatureIcon(feature))
+            .font(.system(size: 26, weight: .semibold))
+            .foregroundStyle(Color.primary.opacity(0.84))
+            .offset(x: cos(radians) * radius, y: sin(radians) * radius)
     }
 
     private func centerOnlyLanguageBacking(diameter: CGFloat) -> some View {
@@ -3316,7 +4311,12 @@ struct ZestSettingsView: View {
               centerOnlyAssignableFeatures.contains(dropped) else { return }
 
         beginLayoutEditIfNeeded()
-        var values = count == 2 ? settingsManager.centerOnlyTwoFeatures : settingsManager.centerOnlyFourFeatures
+        var values: [ZestFeature]
+        switch count {
+        case 2: values = settingsManager.centerOnlyTwoFeatures
+        case 3: values = settingsManager.centerOnlyThreeFeatures
+        default: values = settingsManager.centerOnlyFourFeatures
+        }
         guard values.indices.contains(targetIndex) else { return }
 
         let sourceIndex = centerOnlyDraggedSourceIndex
@@ -3335,15 +4335,22 @@ struct ZestSettingsView: View {
             values[targetIndex] = dropped
         }
 
-        if count == 2 {
+        switch count {
+        case 2:
             settingsManager.centerOnlyTwoFeatures = values
-        } else {
+        case 3:
+            settingsManager.centerOnlyThreeFeatures = values
+        default:
             settingsManager.centerOnlyFourFeatures = values
         }
 
-        if dropped == .openShortcut || dropped == .runShortcut {
+        if dropped == .openShortcut || dropped == .runShortcut || dropped == .url {
             DispatchQueue.main.async {
                 presentCenterActionSetup(feature: dropped, index: targetIndex, count: count)
+            }
+        } else if isBuiltInConfigurableFeature(dropped) {
+            DispatchQueue.main.async {
+                presentTileSetup(dropped)
             }
         }
     }
@@ -3560,21 +4567,68 @@ struct ZestSettingsView: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                ForEach(ZestFeature.allCases.filter { $0 != .empty && $0 != .settings }) { feature in
-                    VStack(spacing: 3) {
-                        Image(systemName: feature.systemImage).font(.system(size: 14, weight: .semibold))
-                        Text(feature.title).font(.system(size: 7.5, weight: .semibold)).lineLimit(1)
-                    }
-                    .frame(width: 58, height: 48)
-                    .background { RoundedRectangle(cornerRadius: 10).fill(accentColor.opacity(0.14)) }
-                    .draggable(feature.rawValue) {
-                        VStack(spacing: 3) { Image(systemName: feature.systemImage); Text(feature.title).font(.system(size: 8, weight: .semibold)) }
+            VStack(spacing: 11) {
+                compactFeatureBankTabs(selection: $tripleFeatureBankTab)
+
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.fixed(82), spacing: 8),
+                        count: compactFeatureBankColumnCount(for: tripleFeatureBankTab)
+                    ),
+                    alignment: .center,
+                    spacing: 8
+                ) {
+                    ForEach(compactFeatureBankFeatures(for: tripleFeatureBankTab)) { feature in
+                        VStack(spacing: 3) {
+                            Image(systemName: centerOnlyFeatureIcon(feature))
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(height: 18)
+
+                            Text(feature.title)
+                                .font(.system(size: 7.5, weight: .semibold))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                                .minimumScaleFactor(0.76)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 18, alignment: .center)
+                        }
+                        .foregroundStyle(Color.primary.opacity(0.82))
+                        .frame(width: 82, height: 52, alignment: .center)
+                        .background {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .fill(Color.primary.opacity(0.035))
+                                .glassEffect(
+                                    .regular.tint(accentColor.opacity(0.10)),
+                                    in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                )
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            compactPagesOnlyInfoButton(feature)
+                                .offset(x: 4, y: -5)
+                        }
+                        .draggable(feature.rawValue) {
+                            VStack(spacing: 3) {
+                                Image(systemName: centerOnlyFeatureIcon(feature))
+                                Text(feature.title)
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                            }
                             .frame(width: 57, height: 57)
                             .background { RoundedRectangle(cornerRadius: 13).fill(accentColor.opacity(0.62)) }
+                        }
                     }
                 }
+                .frame(
+                    width: compactFeatureBankWidth(for: tripleFeatureBankTab),
+                    alignment: .center
+                )
+                .frame(maxWidth: 700, alignment: .center)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .frame(maxWidth: 730, minHeight: 132, alignment: .top)
+            .background { compactBankBackground }
 
             HStack(spacing: 10) {
                 Button { beginLayoutEditIfNeeded(); settingsManager.tripleFeatures = [.empty, .empty, .empty] } label: {
@@ -3615,26 +4669,44 @@ struct ZestSettingsView: View {
                 }
             }
         }
-        .frame(height: 245)
+        .frame(height: 390)
     }
 
     private func tripleDropTile(_ index: Int) -> some View {
         let feature = tripleFeatures[index]
-        return Button { if feature == .settings { openSettings() } } label: {
-            VStack(spacing: 3) {
-                if feature == .empty { Image(systemName: "plus").opacity(0.35) }
-                else {
-                    Image(systemName: feature.systemImage).font(.system(size: 17, weight: .semibold))
-                    Text(feature.title).font(.system(size: 7.5, weight: .semibold)).lineLimit(1)
+        return Button {
+            if feature == .settings {
+                openSettings()
+            } else if isBuiltInConfigurableFeature(feature) {
+                presentTileSetup(feature)
+            }
+        } label: {
+            Group {
+                if feature == .today {
+                    ZestNokiaTodaySquareFace(
+                        accentColor: accentColor,
+                        accentHighlightColor: settingsManager.accentHighlightColor,
+                        accentDeepColor: settingsManager.accentDeepColor,
+                        size: 57
+)
+                } else {
+                    VStack(spacing: 3) {
+                        if feature == .empty { Image(systemName: "plus").opacity(0.35) }
+                        else {
+                            Image(systemName: feature.systemImage).font(.system(size: 17, weight: .semibold))
+                            Text(feature.title).font(.system(size: 7.5, weight: .semibold)).lineLimit(1)
+                        }
+                    }
+                    .frame(width: 57, height: 57)
+                    .background {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(feature == .empty ? Color.primary.opacity(0.025) : accentColor.opacity(0.22))
+                            .glassEffect(.regular.tint(accentColor.opacity(feature == .empty ? 0.04 : 0.15)), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    }
+                    .overlay { RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(feature == .empty ? 0.12 : 0.32), style: StrokeStyle(lineWidth: 0.8, dash: feature == .empty ? [4,4] : [])) }
                 }
             }
             .frame(width: 57, height: 57)
-            .background {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(feature == .empty ? Color.primary.opacity(0.025) : accentColor.opacity(0.22))
-                    .glassEffect(.regular.tint(accentColor.opacity(feature == .empty ? 0.04 : 0.15)), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            }
-            .overlay { RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(feature == .empty ? 0.12 : 0.32), style: StrokeStyle(lineWidth: 0.8, dash: feature == .empty ? [4,4] : [])) }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -3649,8 +4721,10 @@ struct ZestSettingsView: View {
                 values[source] = displaced
             } else { values[index] = dropped }
             tripleFeatures = values
-            if dropped == .openShortcut || dropped == .runShortcut {
+            if dropped == .openShortcut || dropped == .runShortcut || dropped == .url {
                 presentCenterActionSetup(feature: dropped, index: index, count: 3)
+            } else if isBuiltInConfigurableFeature(dropped) {
+                presentTileSetup(dropped)
             }
             return true
         }
@@ -3673,10 +4747,10 @@ struct ZestSettingsView: View {
                 // The previous 1/3 column could become narrower than the
                 // intrinsic button row, which pushed Save over the card edge.
                 let sliceColumnWidth =
-                    max(390, contentWidth * 0.37)
+                    max(355, contentWidth * 0.33)
 
                 let piecesColumnWidth =
-                    max(500, contentWidth - sliceColumnWidth - 18)
+                    max(545, contentWidth - sliceColumnWidth - 18)
 
 
                 HStack(
@@ -3881,7 +4955,7 @@ struct ZestSettingsView: View {
                         .padding(.trailing, 24)
 
 
-                        ZestSliceAssemblyShell(
+                        ZestV34SliceAssemblyShell(
                             accentColor: accentColor,
                             accentHighlightColor:
                                 settingsManager.accentHighlightColor,
@@ -3893,8 +4967,11 @@ struct ZestSettingsView: View {
                             unconfiguredSlots:
                                 unconfiguredActionSlots,
                             onInstalledFeatureTap: { feature, slot in
-                                guard feature == .openShortcut || feature == .runShortcut else { return }
-                                presentActionSetup(feature: feature, slot: slot)
+                                if feature == .openShortcut || feature == .runShortcut || feature == .url {
+                                    presentActionSetup(feature: feature, slot: slot)
+                                } else if isBuiltInConfigurableFeature(feature) {
+                                    presentTileSetup(feature)
+                                }
                             },
                             acceptsFeatureDrops: false,
                             onFeatureDrop: nil,
@@ -4253,7 +5330,12 @@ struct ZestSettingsView: View {
         case .centerOnly:
 
             return
-                "Drag a feature onto the circle. The central language control can later remain fixed or become assignable."
+                "Choose a compact Center Only face and assign actions to its available sectors."
+
+        case .turntable:
+
+            return
+                "Choose a rotating utility face. Turntable controls keep their side hardware fixed while the central content changes."
 
 
         case .orangeSlice:
@@ -4290,8 +5372,15 @@ struct ZestSettingsView: View {
                     settingsManager.centerOnlyTwoFeatures = [.clipboard, .emoji]
                 } else if settingsManager.centerOnlyPage == "fourFeature" {
                     settingsManager.centerOnlyFourFeatures = [.size, .font, .clipboard, .emoji]
+                } else if settingsManager.centerOnlyPage == "calendarThree" || settingsManager.centerOnlyPage == "clockThree" {
+                    settingsManager.centerOnlyThreeFeatures = [.clipboard, .emoji, .symbols]
                 }
 
+
+            case .turntable:
+                if !["language", "clockCalendar", "languageClock"].contains(settingsManager.centerOnlyPage) {
+                    settingsManager.centerOnlyPage = "language"
+                }
 
             case .orangeSlice:
 
@@ -4404,14 +5493,7 @@ struct ZestSettingsView: View {
                     "Zest needs Accessibility access to interact with text in other applications."
             ) {
 
-                permissionRow(
-                    title:
-                        "Accessibility",
-                    symbol:
-                        "accessibility",
-                    granted:
-                        AXIsProcessTrusted()
-                )
+                accessibilityPermissionRow
 
 
                 permissionRow(
@@ -4456,6 +5538,18 @@ struct ZestSettingsView: View {
                     .switch
                 )
 
+                Divider().opacity(0.45)
+
+                Toggle(isOn: $settingsManager.notifyWhenZestStarts) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Notify when Zest starts")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text("Send a small notification after Zest initializes successfully.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
 
                 Text(
                     "Native login-item registration will be connected in the startup pass."
@@ -4471,6 +5565,60 @@ struct ZestSettingsView: View {
                 )
             }
         }
+        .onAppear {
+            accessibilityService.refreshStatus()
+        }
+    }
+
+
+    private var accessibilityPermissionRow: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "accessibility")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(
+                    accessibilityService.isTrusted
+                    ? accentColor
+                    : Color.secondary
+                )
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Accessibility")
+                    .font(.system(size: 11, weight: .semibold))
+
+                Text(
+                    accessibilityService.isTrusted
+                    ? "Zest can read text context, follow the caret, and replace selected text."
+                    : "Required for caret detection, text insertion, Layout Fix, and supported app controls."
+                )
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if accessibilityService.isTrusted {
+                Label("Granted", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(accentColor)
+            } else {
+                HStack(spacing: 7) {
+                    Button("Open Settings") {
+                        accessibilityService.openSystemSettings()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Allow Access") {
+                        accessibilityService.requestAccess()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(accentColor)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .frame(minHeight: 44)
     }
 
 

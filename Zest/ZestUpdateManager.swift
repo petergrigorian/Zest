@@ -9,7 +9,6 @@ import Foundation
 import AppKit
 import Combine
 import Sparkle
-import UserNotifications
 
 enum ZestUpdatePhase: Equatable {
     case idle
@@ -232,9 +231,12 @@ final class ZestUpdateManager:
         lastError = nil
         lastCheckDate = Date()
 
-        sendUpdateAvailableNotification(
-            version: appcastItem.displayVersionString
-        )
+        Task {
+            await ZestNotificationService.shared.deliverUpdateAvailable(
+                version: appcastItem.displayVersionString,
+                build: appcastItem.versionString
+            )
+        }
 
         switch state.stage {
         case .notDownloaded:
@@ -369,31 +371,7 @@ final class ZestUpdateManager:
         )
     }
 
-    private func sendUpdateAvailableNotification(
-        version: String
-    ) {
-        let center = UNUserNotificationCenter.current()
 
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized ||
-                    settings.authorizationStatus == .provisional else {
-                return
-            }
-
-            let content = UNMutableNotificationContent()
-            content.title = "Zest \(version) is available"
-            content.body = "Open Zest Settings to download and install the update."
-            content.sound = .default
-
-            let request = UNNotificationRequest(
-                identifier: "zest.update.\(version)",
-                content: content,
-                trigger: nil
-            )
-
-            center.add(request)
-        }
-    }
 }
 
 extension Notification.Name {

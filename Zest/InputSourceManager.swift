@@ -329,6 +329,11 @@ final class InputSourceManager: ObservableObject {
 
     // MARK: - Select Specific Source
 
+    func source(withID id: String) -> ZestInputSource? {
+        refresh()
+        return sources.first(where: { $0.id == id })
+    }
+
     func select(
         _ source: ZestInputSource
     ) {

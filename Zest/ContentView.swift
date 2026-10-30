@@ -798,6 +798,10 @@ struct ContentView: View {
     @State private var sizePanelPresented = false
     @State private var fontPanelPresented = false
     @State private var clipboardPanelPresented = false
+    @State private var calendarPanelPresented = false
+    @State private var todayPanelPresented = false
+    @State private var batteryPanelPresented = false
+    @State private var layoutFixPanelPresented = false
     @State private var centerPush: CGFloat = 0
 
     // Main Orange Slice center turntable.
@@ -810,6 +814,9 @@ struct ContentView: View {
     @State private var centerOnlySlideDirection: CGFloat = 1
     @State private var centerOnlyLanguageRotation: Double = 0
     @State private var centerOnlyLanguageOpacity: Double = 1
+    @State private var centerOnlyClockCalendarShowsCalendar = false
+    @State private var centerOnlyClockCalendarRotation: Double = 0
+    @State private var centerOnlyClockCalendarOpacity: Double = 1
     @StateObject
     private var emojiLibraryManager =
         EmojiLibraryManager()
@@ -923,7 +930,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             Group {
-                if settingsManager.runtimeFormFactor == .centerOnly {
+                if settingsManager.runtimeFormFactor == .centerOnly || settingsManager.runtimeFormFactor == .turntable {
                     centerOnlyRuntimeControl
                 } else if settingsManager.runtimeFormFactor == .tripleSquare {
                     tripleRuntimeControl
@@ -955,16 +962,34 @@ struct ContentView: View {
                 }
             }
             .fixedSize()
+            // Restore the brighter live/non-key appearance from the stable runtime.
+            // Settings previews remain untouched; this compensates only the in-field
+            // keyboard-assistant host where macOS compositing otherwise deepens accents.
+            .brightness(forceVibrantRendering ? 0.075 : 0)
+            .saturation(forceVibrantRendering ? 1.05 : 1.0)
+            // Apply the runtime placement BEFORE measuring its global frame.
+            // The native click-through monitor consumes this frame, so measuring
+            // before the +120 placement offset could make the exposed right-hand
+            // turntable badge look "outside" Zest and dismiss the panel on click.
+            .offset(x: 120)
             .background {
                 ZestRuntimeHostFrameReader { frame in
-                    if runtimeControlScreenFrame != frame { runtimeControlScreenFrame = frame }
-                    onRuntimeControlFrameChange?(frame)
+                    // Center Ring modes can render attached wings/badges outside the
+                    // nominal circular face. Report a slightly expanded interactive
+                    // region so the native transparent-host click monitor does not
+                    // dismiss Zest before those SwiftUI buttons receive the click.
+                    let interactiveFrame = (settingsManager.runtimeFormFactor == .centerOnly || settingsManager.runtimeFormFactor == .turntable)
+                        ? frame.insetBy(dx: -48, dy: -30)
+                        : frame
+                    if runtimeControlScreenFrame != interactiveFrame {
+                        runtimeControlScreenFrame = interactiveFrame
+                    }
+                    onRuntimeControlFrameChange?(interactiveFrame)
                 }
             }
-            .offset(x: 120)
             .zIndex(10)
             .onReceive(NotificationCenter.default.publisher(for: .zestSaturnPrevious)) { _ in
-                if settingsManager.runtimeFormFactor == .centerOnly && settingsManager.runtimeCenterOnlyPage == "language" {
+                if (settingsManager.runtimeFormFactor == .centerOnly || settingsManager.runtimeFormFactor == .turntable) && ["language", "languageClock"].contains(settingsManager.runtimeCenterOnlyPage) {
                     animateCenterOnlyLanguageChange(direction: -1) { inputSourceManager.refresh() }
                 } else if settingsManager.runtimeFormFactor == .orangeSlice {
                     animateMainSliceLanguageChange(direction: -1) { inputSourceManager.refresh() }
@@ -973,7 +998,7 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .zestSaturnNext)) { _ in
-                if settingsManager.runtimeFormFactor == .centerOnly && settingsManager.runtimeCenterOnlyPage == "language" {
+                if (settingsManager.runtimeFormFactor == .centerOnly || settingsManager.runtimeFormFactor == .turntable) && ["language", "languageClock"].contains(settingsManager.runtimeCenterOnlyPage) {
                     animateCenterOnlyLanguageChange(direction: 1) { inputSourceManager.refresh() }
                 } else if settingsManager.runtimeFormFactor == .orangeSlice {
                     animateMainSliceLanguageChange(direction: 1) { inputSourceManager.refresh() }
@@ -998,6 +1023,7 @@ struct ContentView: View {
                     accentColor: zestAccent,
                     isPresented: $sizePanelPresented
                 )
+                .zestVisibilityBackdrop()
                 .zestRuntimePopupMeasured("size")
                 .background {
                     ZestRuntimeHostFrameReader { frame in
@@ -1016,6 +1042,7 @@ struct ContentView: View {
                     accentColor: zestAccent,
                     isPresented: $fontPanelPresented
                 )
+                .zestVisibilityBackdrop()
                 .zestRuntimePopupMeasured("font")
                 .background {
                     ZestRuntimeHostFrameReader { frame in
@@ -1031,6 +1058,7 @@ struct ContentView: View {
                     clipboardManager: clipboardManager,
                     accentColor: zestAccent
                 )
+                .zestVisibilityBackdrop()
                 .zestRuntimePopupMeasured("clipboard")
                 .background {
                     ZestRuntimeHostFrameReader { frame in
@@ -1051,6 +1079,7 @@ struct ContentView: View {
                     accentColor:
                         zestAccent
                 )
+                .zestVisibilityBackdrop()
                 .zestRuntimePopupMeasured("emoji")
                 .background {
                     ZestRuntimeHostFrameReader { frame in
@@ -1072,6 +1101,7 @@ struct ContentView: View {
                     accentColor:
                         zestAccent
                 )
+                .zestVisibilityBackdrop()
                 .zestRuntimePopupMeasured("symbols")
                 .background {
                     ZestRuntimeHostFrameReader { frame in
@@ -1082,9 +1112,51 @@ struct ContentView: View {
                 .transition(runtimePopupTransition(for: .symbols))
                 .zIndex(24)
             }
+
+            if calendarPanelPresented {
+                ZestCalendarPanel(
+                    accentColor: zestAccent,
+                    onOpenSettings: { openSettingsWindow() }
+                )
+                    .zestRuntimePopupMeasured("calendar")
+                    .background { ZestRuntimeHostFrameReader { frame in onRuntimePopupFrameChange?(frame) } }
+                    .offset(runtimePopupOffset(for: .calendar, measuredKey: "calendar"))
+                    .transition(runtimePopupTransition(for: .calendar))
+                    .zIndex(25)
+            }
+
+            if todayPanelPresented {
+                ZestTodayPanel(accentColor: zestAccent)
+                    .zestRuntimePopupMeasured("today")
+                    .background { ZestRuntimeHostFrameReader { frame in onRuntimePopupFrameChange?(frame) } }
+                    .offset(runtimePopupOffset(for: .today, measuredKey: "today"))
+                    .transition(runtimePopupTransition(for: .today))
+                    .zIndex(25.5)
+            }
+
+            if batteryPanelPresented {
+                ZestBatteryPanel(accentColor: zestAccent)
+                    .zestRuntimePopupMeasured("battery")
+                    .background { ZestRuntimeHostFrameReader { frame in onRuntimePopupFrameChange?(frame) } }
+                    .offset(runtimePopupOffset(for: .battery, measuredKey: "battery"))
+                    .transition(runtimePopupTransition(for: .battery))
+                    .zIndex(26)
+            }
+
+            if layoutFixPanelPresented {
+                ZestLayoutFixPanel(accentColor: zestAccent)
+                    .zestRuntimePopupMeasured("layoutFix")
+                    .background { ZestRuntimeHostFrameReader { frame in onRuntimePopupFrameChange?(frame) } }
+                    .offset(runtimePopupOffset(for: .layoutFix, measuredKey: "layoutFix"))
+                    .transition(runtimePopupTransition(for: .layoutFix))
+                    .zIndex(27)
+            }
             
         }
-        .frame(width: 620, height: 360)
+        .frame(width: 1400, height: 1000)
+        // The visible Zest control remains centered at exactly the same point, but
+        // the SwiftUI runtime stage now matches the complete native transparent host,
+        // so Calendar/search popups cannot hit a smaller internal clipping canvas.
         // NSPanel intentionally remains non-key so the editor keeps the caret.
         // Compensate only visually: explicit saturation/contrast prevents macOS
         // inactive-window compositing from washing the Zest palette toward gray.
@@ -1127,7 +1199,8 @@ struct ContentView: View {
             if !presented { onRuntimePopupFrameChange?(nil) }
         }
         .onChange(of: settingsManager.runtimeCenterOnlyPage) { _, newPage in
-            if settingsManager.runtimeFormFactor == .centerOnly && newPage == "language" {
+            if settingsManager.runtimeFormFactor == .turntable
+                || (settingsManager.runtimeFormFactor == .centerOnly && ["language", "languageClock", "clockCalendar"].contains(newPage)) {
                 closeAllFeaturePanels()
             }
         }
@@ -1249,13 +1322,37 @@ struct ContentView: View {
                 closeAllFeaturePanels()
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { symbolPanelPresented = !wasOpen }
 
+            case .calendar:
+                let wasOpen = calendarPanelPresented
+                closeAllFeaturePanels()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { calendarPanelPresented = !wasOpen }
+
+            case .today:
+                let wasOpen = todayPanelPresented
+                closeAllFeaturePanels()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { todayPanelPresented = !wasOpen }
+
+            case .battery:
+                let wasOpen = batteryPanelPresented
+                closeAllFeaturePanels()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { batteryPanelPresented = !wasOpen }
+
+            case .layoutFix:
+                let wasOpen = layoutFixPanelPresented
+                closeAllFeaturePanels()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { layoutFixPanelPresented = !wasOpen }
+
+            case .rapidSymbols:
+                closeAllFeaturePanels()
+                ZestRapidSymbolEngine.shared.arm()
+
             case .settings:
                 openSettingsWindow()
 
             case .empty:
                 break
 
-            case .openShortcut, .runShortcut:
+            case .openShortcut, .runShortcut, .url:
                 if let slot = ZestSliceSlot(rawValue: control.number),
                    settingsManager.isConfigured(control.feature, in: slot) {
                     _ = settingsManager.performConfiguredAction(for: control.feature, in: slot)
@@ -1354,40 +1451,38 @@ struct ContentView: View {
     private func performMenuBarFeature(_ feature: ZestFeature) {
         switch feature {
         case .size:
-            let wasOpen = sizePanelPresented
-            closeAllFeaturePanels()
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { sizePanelPresented = !wasOpen }
+            let wasOpen = sizePanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { sizePanelPresented = !wasOpen }
         case .font:
-            let wasOpen = fontPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { fontPanelPresented = !wasOpen }
+            let wasOpen = fontPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { fontPanelPresented = !wasOpen }
         case .clipboard:
-            let wasOpen = clipboardPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { clipboardPanelPresented = !wasOpen }
+            let wasOpen = clipboardPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { clipboardPanelPresented = !wasOpen }
         case .emoji:
-            let wasOpen = emojiPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { emojiPanelPresented = !wasOpen }
+            let wasOpen = emojiPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { emojiPanelPresented = !wasOpen }
         case .symbols:
-            let wasOpen = symbolPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { symbolPanelPresented = !wasOpen }
+            let wasOpen = symbolPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { symbolPanelPresented = !wasOpen }
+        case .calendar:
+            let wasOpen = calendarPanelPresented; closeAllFeaturePanels(); withAnimation { calendarPanelPresented = !wasOpen }
+        case .today:
+            let wasOpen = todayPanelPresented; closeAllFeaturePanels(); withAnimation { todayPanelPresented = !wasOpen }
+        case .battery:
+            let wasOpen = batteryPanelPresented; closeAllFeaturePanels(); withAnimation { batteryPanelPresented = !wasOpen }
+        case .layoutFix:
+            let wasOpen = layoutFixPanelPresented; closeAllFeaturePanels(); withAnimation { layoutFixPanelPresented = !wasOpen }
+        case .rapidSymbols:
+            closeAllFeaturePanels(); ZestRapidSymbolEngine.shared.arm()
         case .settings:
             openSettingsWindow()
-        case .openShortcut, .runShortcut, .empty:
+        case .openShortcut, .runShortcut, .url, .empty:
             break
         }
     }
 
     private var anyRuntimePopupPresented: Bool {
-        sizePanelPresented || fontPanelPresented || clipboardPanelPresented || emojiPanelPresented || symbolPanelPresented
+        sizePanelPresented || fontPanelPresented || clipboardPanelPresented || emojiPanelPresented || symbolPanelPresented || calendarPanelPresented || todayPanelPresented || batteryPanelPresented || layoutFixPanelPresented
     }
 
     private func closeAllFeaturePanels() {
-        guard sizePanelPresented || fontPanelPresented || clipboardPanelPresented || emojiPanelPresented || symbolPanelPresented else {
-            return
-        }
+        guard anyRuntimePopupPresented else { return }
 
         // Keep removal inside an explicit transaction. SwiftUI transitions only
         // animate when the state mutation itself is animated; previously several
@@ -1399,6 +1494,10 @@ struct ContentView: View {
             clipboardPanelPresented = false
             emojiPanelPresented = false
             symbolPanelPresented = false
+            calendarPanelPresented = false
+            todayPanelPresented = false
+            batteryPanelPresented = false
+            layoutFixPanelPresented = false
         }
     }
 
@@ -1484,7 +1583,7 @@ struct ContentView: View {
     @State private var runtimeSettingsGearHover = false
 
     private var tripleRuntimeControl: some View {
-        ZestTripleTileControl(
+        ZestV34TripleTileControl(
             features: settingsManager.runtimeTripleFeatures,
             featureColors: (0..<3).map { settingsManager.accentColor(at: $0) },
             accentColor: zestOrange,
@@ -1494,6 +1593,16 @@ struct ContentView: View {
             rearGlassPrimaryColor: rearGlassPrimary,
             rearGlassBrightColor: rearGlassBright,
             forceVibrantRendering: forceVibrantRendering,
+            featureIcon: { feature, index in
+                AnyView(
+                    configuredCenterRuntimeIcon(
+                        feature,
+                        count: 3,
+                        index: index,
+                        size: 20
+                    )
+                )
+            },
             onFeature: { feature, index in
                 performTripleFeature(feature, index: index)
             },
@@ -1542,12 +1651,14 @@ struct ContentView: View {
             // can flip this below the complete control.
             return CGVector(dx: 0, dy: -1)
 
-        case .centerOnly:
+        case .centerOnly, .turntable:
             let count = max(activeCenterFeatureCount, 2)
             let index = min(max(activeCenterFeatureIndex, 0), count - 1)
             let degrees: Double
             if count == 2 {
                 degrees = index == 0 ? -90 : 90
+            } else if count == 3 {
+                degrees = [145, 90, 35][index]
             } else {
                 degrees = [-90, 0, 90, 180][index]
             }
@@ -1566,7 +1677,20 @@ struct ContentView: View {
     }
 
     private func runtimePopupOffset(for feature: ZestFeature, measuredKey: String) -> CGSize {
-        let popup = runtimePopupSizes[measuredKey] ?? defaultPopupSize(for: feature)
+        let measured = runtimePopupSizes[measuredKey] ?? defaultPopupSize(for: feature)
+        let reserved = reservedPopupPlacementSize(for: feature)
+        // Calendar and Today change height as their event content changes. Never let a
+        // transient smaller GeometryReader measurement shrink their safety envelope;
+        // that was the recurring cause of the top of Calendar being placed off-screen.
+        let popup: CGSize
+        if feature == .calendar || feature == .today {
+            popup = CGSize(
+                width: max(measured.width, reserved.width),
+                height: max(measured.height, reserved.height)
+            )
+        } else {
+            popup = measured
+        }
         let compactGap: CGFloat = 14
 
         // Triple Square has one spatial rule only: feature panels live above the
@@ -1593,8 +1717,12 @@ struct ContentView: View {
                 candidate.y = expandedBottomEdge + belowGap + popup.height / 2
             }
 
-            let clamped = clampPopupToVisibleScreen(centerOffset: candidate, size: popup, margin: 8)
-            return CGSize(width: clamped.x, height: clamped.y)
+            let finalClamped = clampPopupToVisibleHost(
+                centerOffset: candidate,
+                size: popup,
+                margin: 8
+            )
+            return CGSize(width: finalClamped.x, height: finalClamped.y)
         }
 
         let direction = runtimePopupDirection(for: feature)
@@ -1604,8 +1732,9 @@ struct ContentView: View {
 
         let controlRadius: CGFloat
         switch settingsManager.runtimeFormFactor {
-        case .centerOnly:
-            controlRadius = centerRadius * (centerOnlyRuntimeMode == "language" ? 1.0 : 1.20)
+        case .centerOnly, .turntable:
+            let compactCenterFace = ["language", "clockCalendar", "languageClock"].contains(centerOnlyRuntimeMode)
+            controlRadius = centerRadius * (compactCenterFace ? 1.0 : 1.20) * 1.30
         case .orangeSlice:
             controlRadius = outerTileRadius
         case .tripleSquare:
@@ -1636,6 +1765,14 @@ struct ContentView: View {
             )
         }
 
+        // Calendar is substantially taller than Zest's legacy feature popups.
+        // Keep it horizontally attached to the launching sector but vertically
+        // centered inside the runtime stage. This prevents diagonal launch geometry
+        // from pushing the top half outside the transparent host.
+        if feature == .calendar {
+            candidate.y = 0
+        }
+
         if settingsManager.runtimeFormFactor == .orangeSlice {
             candidate.x += mainSliceCommittedOffset.width + mainSliceDragTranslation.width
             candidate.y += mainSliceCommittedOffset.height + mainSliceDragTranslation.height
@@ -1646,14 +1783,23 @@ struct ContentView: View {
         // left. Near an edge we slide the popup up/down (and minimally clamp it into
         // the visible frame) instead of mirroring it across Zest. This preserves the
         // user's spatial map for tiles 4/5/6 even when Zest hugs a display bezel.
-        let clamped = clampPopupToVisibleScreen(centerOffset: candidate, size: popup, margin: 8)
+        let bounded = clampPopupToVisibleHost(
+            centerOffset: candidate,
+            size: popup,
+            margin: 8
+        )
         let separated = resolvePopupCollision(
-            centerOffset: clamped,
+            centerOffset: bounded,
             size: popup,
             preferredDirection: direction,
             gap: compactGap
         )
-        return CGSize(width: separated.x, height: separated.y)
+        let finalClamped = clampPopupToVisibleHost(
+            centerOffset: separated,
+            size: popup,
+            margin: 8
+        )
+        return CGSize(width: finalClamped.x, height: finalClamped.y)
     }
 
     /// Keeps the popup and the visible Zest control as two distinct objects.
@@ -1767,6 +1913,14 @@ struct ContentView: View {
             return CGSize(width: 320, height: 390)
         case .size:
             return CGSize(width: 300, height: 110)
+        case .calendar:
+            return CGSize(width: 400, height: 650)
+        case .today:
+            return CGSize(width: 410, height: 520)
+        case .battery:
+            return CGSize(width: 300, height: 220)
+        case .layoutFix:
+            return CGSize(width: 360, height: 300)
         default:
             return CGSize(width: 320, height: 220)
         }
@@ -1777,6 +1931,10 @@ struct ContentView: View {
         case .size: return CGSize(width: 300, height: 104)
         case .clipboard: return CGSize(width: 320, height: 370)
         case .font, .emoji, .symbols: return CGSize(width: 360, height: 330)
+        case .calendar: return CGSize(width: 360, height: 520)
+        case .today: return CGSize(width: 410, height: 520)
+        case .battery: return CGSize(width: 300, height: 210)
+        case .layoutFix: return CGSize(width: 360, height: 260)
         default: return CGSize(width: 320, height: 220)
         }
     }
@@ -1785,6 +1943,64 @@ struct ContentView: View {
         guard runtimeHostScreenFrame.width > 0, let visible = runtimeVisibleScreenFrame else { return true }
         let rect = popupScreenRect(centerOffset: centerOffset, size: popup)
         return visible.insetBy(dx: 8, dy: 8).contains(rect)
+    }
+
+    /// Clamps a popup to the one rectangle it is actually allowed to occupy:
+    /// the intersection of the visible monitor and Zest's transparent NSPanel host.
+    /// This prevents a tall popup from being "on screen" but outside the invisible
+    /// host window, which is what repeatedly clipped the top of Calendar.
+    private func clampPopupToVisibleHost(
+        centerOffset: CGPoint,
+        size popup: CGSize,
+        margin: CGFloat
+    ) -> CGPoint {
+        guard runtimeHostScreenFrame.width > 0,
+              runtimeHostScreenFrame.height > 0,
+              let visible = runtimeVisibleScreenFrame else { return centerOffset }
+
+        let legalFrame = visible.intersection(runtimeHostScreenFrame)
+        guard !legalFrame.isNull, !legalFrame.isEmpty else { return centerOffset }
+
+        var center = popupScreenCenter(for: centerOffset)
+        let minX = legalFrame.minX + popup.width / 2 + margin
+        let maxX = legalFrame.maxX - popup.width / 2 - margin
+        let minY = legalFrame.minY + popup.height / 2 + margin
+        let maxY = legalFrame.maxY - popup.height / 2 - margin
+
+        if minX <= maxX { center.x = min(max(center.x, minX), maxX) }
+        if minY <= maxY { center.y = min(max(center.y, minY), maxY) }
+
+        return CGPoint(
+            x: center.x - runtimeHostScreenFrame.midX,
+            y: runtimeHostScreenFrame.midY - center.y
+        )
+    }
+
+    /// Keeps a runtime popup inside the invisible NSPanel/SwiftUI presentation canvas.
+    /// Screen clamping alone is not enough: the 1400×1000 transparent host can be
+    /// positioned partially off-screen beside the caret, and SwiftUI clips anything
+    /// that crosses that host boundary even when the same rectangle is valid on the
+    /// physical display. Calendar exposed this because it is much taller than Zest's
+    /// older feature panels.
+    private func clampPopupToRuntimeCanvas(
+        centerOffset: CGPoint,
+        size popup: CGSize,
+        margin: CGFloat
+    ) -> CGPoint {
+        let hostSize = runtimeHostScreenFrame.size
+        guard hostSize.width > 0, hostSize.height > 0 else { return centerOffset }
+
+        var result = centerOffset
+        let halfHostWidth = hostSize.width / 2
+        let halfHostHeight = hostSize.height / 2
+        let minX = -halfHostWidth + popup.width / 2 + margin
+        let maxX = halfHostWidth - popup.width / 2 - margin
+        let minY = -halfHostHeight + popup.height / 2 + margin
+        let maxY = halfHostHeight - popup.height / 2 - margin
+
+        if minX <= maxX { result.x = min(max(result.x, minX), maxX) }
+        if minY <= maxY { result.y = min(max(result.y, minY), maxY) }
+        return result
     }
 
     private func clampPopupToVisibleScreen(centerOffset: CGPoint, size popup: CGSize, margin: CGFloat) -> CGPoint {
@@ -1829,8 +2045,13 @@ struct ContentView: View {
         case .clipboard: let w = clipboardPanelPresented; closeAllFeaturePanels(); withAnimation { clipboardPanelPresented = !w }
         case .emoji: let w = emojiPanelPresented; closeAllFeaturePanels(); withAnimation { emojiPanelPresented = !w }
         case .symbols: let w = symbolPanelPresented; closeAllFeaturePanels(); withAnimation { symbolPanelPresented = !w }
+        case .calendar: let w = calendarPanelPresented; closeAllFeaturePanels(); withAnimation { calendarPanelPresented = !w }
+        case .today: let w = todayPanelPresented; closeAllFeaturePanels(); withAnimation { todayPanelPresented = !w }
+        case .battery: let w = batteryPanelPresented; closeAllFeaturePanels(); withAnimation { batteryPanelPresented = !w }
+        case .layoutFix: let w = layoutFixPanelPresented; closeAllFeaturePanels(); withAnimation { layoutFixPanelPresented = !w }
+        case .rapidSymbols: closeAllFeaturePanels(); ZestRapidSymbolEngine.shared.arm()
         case .settings: openSettingsWindow()
-        case .openShortcut, .runShortcut:
+        case .openShortcut, .runShortcut, .url:
             if !settingsManager.performCenterConfiguredAction(feature, count: 3, index: index) { openSettingsWindow() }
         case .empty: break
         }
@@ -1839,7 +2060,7 @@ struct ContentView: View {
     // MARK: - Center-Only Runtime
 
     private var centerOnlyRuntimeMode: String {
-        ["language", "twoFeature", "fourFeature"].contains(settingsManager.runtimeCenterOnlyPage)
+        ["language", "clockCalendar", "languageClock", "calendarThree", "clockThree", "twoFeature", "fourFeature"].contains(settingsManager.runtimeCenterOnlyPage)
             ? settingsManager.runtimeCenterOnlyPage
             : "language"
     }
@@ -1849,9 +2070,10 @@ struct ContentView: View {
         // Runtime shows only the Center Only control itself. The larger
         // circular page-selector buttons belong to Settings/configuration.
         centerOnlyRuntimeRing
+            .scaleEffect(1.30)
             .frame(
-                width: centerRadius * 2 + 100,
-                height: centerRadius * 2 + 72
+                width: (centerRadius * 2 + 100) * 1.30,
+                height: (centerRadius * 2 + 72) * 1.30
             )
             .onAppear { syncCenterOnlyRuntimeSelection() }
             .onChange(of: settingsManager.runtimeCenterOnlyPage) { _, _ in
@@ -1862,11 +2084,9 @@ struct ContentView: View {
 
     @ViewBuilder
     private var centerOnlyRuntimeRing: some View {
-        if centerOnlyRuntimeMode == "language" {
-            // IMPORTANT: this is the shared production renderer. Onboarding
-            // uses this exact same component, so the tutorial cannot drift
-            // away from the real in-field Center Only turntable.
-            ZestCenterOnlyLanguageTurntable(
+        switch centerOnlyRuntimeMode {
+        case "language":
+            ZestV34CenterOnlyLanguageTurntable(
                 accentColor: zestOrange,
                 accentBrightColor: zestAmber,
                 accentHighlightColor: zestGold,
@@ -1897,9 +2117,108 @@ struct ContentView: View {
                 }
             )
             .id("language-\(inputSourceManager.currentSource?.name ?? "ABC")")
-        } else {
+
+        case "clockCalendar":
+            ZestV34CenterOnlyClockCalendarTurntable(
+                accentColor: zestOrange,
+                accentBrightColor: zestAmber,
+                accentHighlightColor: zestGold,
+                accentDeepColor: deepAmber,
+                rearGlassPrimaryColor: rearGlassPrimary,
+                rearGlassBrightColor: rearGlassBright,
+                showsCalendar: centerOnlyClockCalendarShowsCalendar,
+                faceRotation: centerOnlyClockCalendarRotation,
+                faceOpacity: centerOnlyClockCalendarOpacity,
+                forceVibrantRendering: forceVibrantRendering,
+                onToggle: {
+                    // Deliberately mirror the proven Language Turntable callback chain:
+                    // direction state -> center push -> staged rotation -> midpoint swap.
+                    let direction = centerOnlyClockCalendarShowsCalendar ? -1 : 1
+                    centerOnlySlideDirection = CGFloat(direction)
+                    pushCenter(direction: CGFloat(direction))
+                    animateCenterOnlyClockCalendarChange(direction: direction) {
+                        centerOnlyClockCalendarShowsCalendar.toggle()
+                    }
+                },
+                onSettings: {
+                    openSettingsWindow()
+                },
+                onDragChanged: { translation, ended in
+                    onRuntimeDrag?(translation, ended)
+                }
+            )
+
+        case "languageClock":
+            ZestV35LanguageClockTurntable(
+                accentColor: zestOrange,
+                accentBrightColor: zestAmber,
+                accentHighlightColor: zestGold,
+                accentDeepColor: deepAmber,
+                rearGlassPrimaryColor: rearGlassPrimary,
+                rearGlassBrightColor: rearGlassBright,
+                shortLabel: inputSourceManager.currentSource?.shortLabel ?? "EN",
+                languageRotation: centerOnlyLanguageRotation,
+                languageOpacity: centerOnlyLanguageOpacity,
+                forceVibrantRendering: forceVibrantRendering,
+                onRotateLanguage: {
+                    centerOnlySlideDirection = 1
+                    pushCenter(direction: 1)
+                    animateCenterOnlyLanguageChange(direction: 1) {
+                        inputSourceManager.selectNext()
+                    }
+                },
+                onSettings: {
+                    openSettingsWindow()
+                },
+                onDragChanged: { translation, ended in
+                    onRuntimeDrag?(translation, ended)
+                }
+            )
+            .id("languageClock-\(inputSourceManager.currentSource?.name ?? "ABC")")
+
+        case "calendarThree":
+            centerOnlyTopThreeRuntimeRing(kind: .calendar)
+
+        case "clockThree":
+            centerOnlyTopThreeRuntimeRing(kind: .clock)
+
+        default:
             centerOnlySplitRuntimeRing
         }
+    }
+
+    private func centerOnlyTopThreeRuntimeRing(
+        kind: ZestV34CenterTopDisplayKind
+    ) -> some View {
+        let diameter = centerRadius * 2 * 1.20
+
+        return ZStack {
+            ZestV34CenterOnlyTopThreeView(
+                features: settingsManager.runtimeCenterOnlyThreeFeatures,
+                featureColors: (0..<3).map { settingsManager.accentColor(at: $0) },
+                displayKind: kind,
+                accentColor: zestOrange,
+                accentBrightColor: zestAmber,
+                accentHighlightColor: zestGold,
+                accentDeepColor: deepAmber,
+                forceVibrantRendering: forceVibrantRendering,
+                diameter: diameter,
+                onFeature: { feature, index in
+                    performCenterFeature(feature, count: 3, index: index)
+                },
+                onSettings: {
+                    openSettingsWindow()
+                }
+            )
+
+            ZestRuntimeBezelDragShape(innerRatio: 0.80)
+                .fill(Color.clear)
+                .contentShape(ZestRuntimeBezelDragShape(innerRatio: 0.80))
+                .frame(width: diameter + 12, height: diameter + 12)
+                .gesture(runtimePanelDragGesture)
+                .zIndex(50)
+        }
+        .frame(width: diameter, height: diameter)
     }
 
 
@@ -1915,7 +2234,7 @@ struct ContentView: View {
         return ZStack {
             // Shared production 2/4 Split renderer. Onboarding uses this same
             // component so tutorial geometry and live in-field Zest cannot drift.
-            ZestCenterOnlySplitView(
+            ZestV34CenterOnlySplitView(
                 features: features,
                 count: count,
                 featureColors: colors,
@@ -2249,6 +2568,29 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func configuredCenterRuntimeIcon(
+        _ feature: ZestFeature,
+        count: Int,
+        index: Int,
+        size: CGFloat
+    ) -> some View {
+        let key = settingsManager.centerActionKey(count: count, index: index)
+
+        if feature == .openShortcut || feature == .runShortcut || feature == .url {
+            ZestConfiguredActionIcon(
+                feature: feature,
+                applicationTarget: settingsManager.centerApplicationTargets[key],
+                urlTarget: ZestURLTargetStore.shared.target(centerKey: key),
+                size: size
+            )
+        } else {
+            Image(systemName: centerOnlyRuntimeFeatureIcon(feature))
+                .font(.system(size: size * 0.82, weight: .semibold))
+                .frame(width: size, height: size)
+        }
+    }
+
     private func centerOnlyRuntimeFeatureDisk(features: [ZestFeature], count: Int, diameter: CGFloat) -> some View {
         ZStack {
             ForEach(0..<count, id: \.self) { index in
@@ -2272,8 +2614,12 @@ struct ContentView: View {
                                     .stroke(Color.white.opacity(feature == .empty ? 0.12 : (isHovered ? 0.48 : 0.24)), lineWidth: isHovered ? 0.95 : 0.65)
                             }
                         if feature != .empty {
-                            Image(systemName: centerOnlyRuntimeFeatureIcon(feature))
-                                .font(.system(size: count == 2 ? 17 : 14, weight: .semibold))
+                            configuredCenterRuntimeIcon(
+                                feature,
+                                count: count,
+                                index: index,
+                                size: count == 2 ? 20 : 17
+                            )
                                 .foregroundStyle(Color.primary.opacity(isHovered ? 0.98 : 0.82))
                                 .scaleEffect(isHovered ? 1.10 : 1.0)
                                 .offset(x: cos(radians) * radius, y: sin(radians) * radius)
@@ -2332,69 +2678,28 @@ struct ContentView: View {
         activeCenterFeatureIndex = index
         switch feature {
         case .size:
-            let wasOpen = sizePanelPresented
-            closeAllFeaturePanels()
-            withAnimation(
-                .spring(
-                    response: 0.28,
-                    dampingFraction: 0.82
-                )
-            ) {
-                sizePanelPresented = !wasOpen
-            }
-
+            let w = sizePanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { sizePanelPresented = !w }
         case .font:
-            let wasOpen = fontPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(
-                .spring(
-                    response: 0.28,
-                    dampingFraction: 0.82
-                )
-            ) {
-                fontPanelPresented = !wasOpen
-            }
-
+            let w = fontPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { fontPanelPresented = !w }
         case .clipboard:
-            let wasOpen = clipboardPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(
-                .spring(
-                    response: 0.28,
-                    dampingFraction: 0.82
-                )
-            ) {
-                clipboardPanelPresented = !wasOpen
-            }
-
+            let w = clipboardPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { clipboardPanelPresented = !w }
         case .emoji:
-            let wasOpen = emojiPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(
-                .spring(
-                    response: 0.28,
-                    dampingFraction: 0.82
-                )
-            ) {
-                emojiPanelPresented = !wasOpen
-            }
-
+            let w = emojiPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { emojiPanelPresented = !w }
         case .symbols:
-            let wasOpen = symbolPanelPresented
-            closeAllFeaturePanels()
-            withAnimation(
-                .spring(
-                    response: 0.28,
-                    dampingFraction: 0.82
-                )
-            ) {
-                symbolPanelPresented = !wasOpen
-            }
-
+            let w = symbolPanelPresented; closeAllFeaturePanels(); withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) { symbolPanelPresented = !w }
+        case .calendar:
+            let w = calendarPanelPresented; closeAllFeaturePanels(); withAnimation { calendarPanelPresented = !w }
+        case .today:
+            let w = todayPanelPresented; closeAllFeaturePanels(); withAnimation { todayPanelPresented = !w }
+        case .battery:
+            let w = batteryPanelPresented; closeAllFeaturePanels(); withAnimation { batteryPanelPresented = !w }
+        case .layoutFix:
+            let w = layoutFixPanelPresented; closeAllFeaturePanels(); withAnimation { layoutFixPanelPresented = !w }
+        case .rapidSymbols:
+            closeAllFeaturePanels(); ZestRapidSymbolEngine.shared.arm()
         case .settings:
             openSettingsWindow()
-
-        case .openShortcut, .runShortcut:
+        case .openShortcut, .runShortcut, .url:
             if settingsManager.isCenterConfigured(feature, count: count, index: index) {
                 _ = settingsManager.performCenterConfiguredAction(feature, count: count, index: index)
             } else {
@@ -2404,7 +2709,6 @@ struct ContentView: View {
             break
         }
     }
-
 
     // MARK: - Center Control
 
@@ -2709,6 +3013,34 @@ struct ContentView: View {
     }
 
 
+    // Clock / Calendar uses the exact same staged turntable workflow as Language:
+    // old face rotates/fades out, the data source swaps only at the midpoint,
+    // then the incoming face rotates/fades back to rest.
+    private func animateCenterOnlyClockCalendarChange(
+        direction: Int,
+        change: @escaping () -> Void
+    ) {
+        let clockwise = direction > 0
+        let exitAngle = clockwise ? 54.0 : -54.0
+        let entryAngle = -exitAngle
+
+        withAnimation(.easeIn(duration: 0.10)) {
+            centerOnlyClockCalendarRotation = exitAngle
+            centerOnlyClockCalendarOpacity = 0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            change()
+            centerOnlyClockCalendarRotation = entryAngle
+
+            withAnimation(.easeOut(duration: 0.15)) {
+                centerOnlyClockCalendarRotation = 0
+                centerOnlyClockCalendarOpacity = 1
+            }
+        }
+    }
+
+
     // MARK: - Center Push Animation
     // Retained only for the compact Center Only / 2x4 turntable.
     private func pushCenter(direction: CGFloat) {
@@ -2809,22 +3141,43 @@ struct ContentView: View {
                         .frame(maxWidth: 58)
                 }
 
+            // TODAY / NOKIA CLOCK TILE
+
+            } else if control.feature == .today {
+
+                ZestNokiaTodayWedgeFace(
+                    startAngle: control.startAngle,
+                    endAngle: control.endAngle,
+                    innerRadius: innerTileRadius,
+                    outerRadius: outerTileRadius,
+                    gapInset: tileGapInset,
+                    startGapInset: control.number == 2 ? endGapInset : nil,
+                    endGapInset: control.number == 7 ? endGapInset : nil,
+                    canvasSize: size,
+                    accentColor: settingsManager.accentColor(at: control.number - 2),
+                    accentHighlightColor: zestGold,
+                    accentDeepColor: deepAmber
+                )
+                .frame(width: size, height: size)
+
             // ALL OTHER TILES
 
             } else {
 
                 VStack(spacing: 1.5) {
 
-                    Image(
-                        systemName:
-                            control.symbol
-                    )
-                    .font(
-                        .system(
-                            size: 13,
-                            weight: .semibold
+                    if let slot = ZestSliceSlot(rawValue: control.number),
+                       control.feature == .openShortcut || control.feature == .runShortcut || control.feature == .url {
+                        ZestConfiguredActionIcon(
+                            feature: control.feature,
+                            applicationTarget: settingsManager.applicationTargets[slot],
+                            urlTarget: ZestURLTargetStore.shared.target(for: slot.rawValue),
+                            size: 17
                         )
-                    )
+                    } else {
+                        Image(systemName: control.symbol)
+                            .font(.system(size: 13, weight: .semibold))
+                    }
 
                     Text(control.title)
                         .font(
@@ -2837,7 +3190,10 @@ struct ContentView: View {
             }
         }
         .foregroundStyle(Color.primary.opacity(0.84))
-        .offset(x: x, y: y)
+        .offset(
+            x: control.feature == .today ? 0 : x,
+            y: control.feature == .today ? 0 : y
+        )
     }
 
     // MARK: - Size Tile Value

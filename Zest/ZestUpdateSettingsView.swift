@@ -2,7 +2,7 @@
 //  ZestUpdateSettingsView.swift
 //  Zest
 //
-//  0.1.1 — custom Software Update page
+//  0.1.2 — Software Update page + GitHub release notes preview
 //
 
 import SwiftUI
@@ -10,44 +10,38 @@ import AppKit
 import UserNotifications
 
 struct ZestUpdateSettingsView: View {
-    @ObservedObject private var updateManager =
-        ZestUpdateManager.shared
+    @ObservedObject private var updateManager = ZestUpdateManager.shared
+    @ObservedObject private var notificationService = ZestNotificationService.shared
+    @ObservedObject private var releaseNotes = ZestReleaseNotesService.shared
 
     let accentColor: Color
 
     @State private var automaticChecks = false
     @State private var automaticDownloads = false
     @State private var didLoadUpdaterPreferences = false
+    @State private var releaseNotesExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Software Update")
-                    .font(
-                        .system(
-                            size: 26,
-                            weight: .bold,
-                            design: .rounded
-                        )
-                    )
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Software Update")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                    Text("Keep Zest current without leaving the app.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
 
-                Text("Keep Zest current without leaving the app.")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                updateCard
+                releaseNotesCard
+                settingsCard
             }
-
-            updateCard
-
-            settingsCard
-
-            Spacer()
+            .padding(28)
         }
-        .padding(28)
         .onAppear {
-            if !updateManager.isStarted {
-                updateManager.start()
-            }
+            if !updateManager.isStarted { updateManager.start() }
             loadUpdaterPreferences()
+            Task { await notificationService.refreshAuthorizationStatus() }
         }
     }
 
@@ -55,12 +49,9 @@ struct ZestUpdateSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .center, spacing: 14) {
                 ZStack {
-                    RoundedRectangle(
-                        cornerRadius: 13,
-                        style: .continuous
-                    )
-                    .fill(accentColor.opacity(0.12))
-                    .frame(width: 54, height: 54)
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(accentColor.opacity(0.12))
+                        .frame(width: 54, height: 54)
 
                     Image(systemName: statusSymbol)
                         .font(.system(size: 23, weight: .semibold))
@@ -69,14 +60,7 @@ struct ZestUpdateSettingsView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(statusTitle)
-                        .font(
-                            .system(
-                                size: 16,
-                                weight: .bold,
-                                design: .rounded
-                            )
-                        )
-
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
                     Text(statusSubtitle)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -84,62 +68,17 @@ struct ZestUpdateSettingsView: View {
                 }
 
                 Spacer()
-
                 primaryAction
             }
 
-            if updateManager.phase == .downloading {
-                downloadProgress
-            }
+            if updateManager.phase == .downloading { downloadProgress }
+            if updateManager.phase == .extracting { extractionProgress }
 
-            if updateManager.phase == .extracting {
-                extractionProgress
-            }
-
-            if let notes = updateManager.releaseNotesText,
-               !notes.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-               ).isEmpty,
-               updateManager.phase == .available ||
-               updateManager.phase == .readyToInstall {
-
-                Divider().opacity(0.45)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("What’s New")
-                        .font(.system(size: 11, weight: .semibold))
-
-                    Text(stripSimpleHTML(notes))
-                        .font(.system(size: 11))
+            if updateManager.phase == .available || updateManager.phase == .readyToInstall {
+                HStack(spacing: 10) {
+                    Button("Later") { updateManager.remindMeLater() }
+                    Button("Skip This Version") { updateManager.skipCurrentVersion() }
                         .foregroundStyle(.secondary)
-                        .lineLimit(8)
-                        .textSelection(.enabled)
-                }
-            }
-
-            if let url = updateManager.releaseNotesURL,
-               updateManager.phase == .available ||
-               updateManager.phase == .readyToInstall {
-
-                Button("View Full Release Notes") {
-                    NSWorkspace.shared.open(url)
-                }
-                .buttonStyle(.link)
-                .font(.system(size: 10.5, weight: .medium))
-            }
-
-            if updateManager.phase == .available ||
-               updateManager.phase == .readyToInstall {
-
-                HStack(spacing: 8) {
-                    Button("Later") {
-                        updateManager.remindMeLater()
-                    }
-
-                    Button("Skip This Version") {
-                        updateManager.skipCurrentVersion()
-                    }
-                    .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 10.5, weight: .medium))
@@ -147,18 +86,104 @@ struct ZestUpdateSettingsView: View {
         }
         .padding(18)
         .background {
-            RoundedRectangle(
-                cornerRadius: 18,
-                style: .continuous
-            )
-            .fill(Color.primary.opacity(0.035))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
         }
         .overlay {
-            RoundedRectangle(
-                cornerRadius: 18,
-                style: .continuous
-            )
-            .stroke(Color.white.opacity(0.10), lineWidth: 0.8)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 0.8)
+        }
+    }
+
+    private var releaseNotesCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(accentColor.opacity(0.10))
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Release Notes")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Preview the GitHub release notes for this version without leaving Zest.")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                        releaseNotesExpanded.toggle()
+                    }
+                    if releaseNotesExpanded { loadReleaseNotes() }
+                } label: {
+                    Label(
+                        releaseNotesExpanded ? "Hide Release Notes" : "View Release Notes",
+                        systemImage: releaseNotesExpanded ? "chevron.up.circle" : "doc.text"
+                    )
+                }
+                .buttonStyle(ZestSecondaryActionButtonStyle())
+            }
+
+            if releaseNotesExpanded {
+                Divider().opacity(0.45)
+
+                Group {
+                    if releaseNotes.isLoading {
+                        HStack(spacing: 9) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading release notes from GitHub…")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+                    } else if !releaseNotes.text.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ScrollView {
+                                Text(releaseNotes.text)
+                                    .font(.system(size: 11, weight: .regular))
+                                    .foregroundStyle(Color.primary.opacity(0.88))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 240)
+
+                            if let url = releaseNotes.sourceURL {
+                                Button {
+                                    NSWorkspace.shared.open(url)
+                                } label: {
+                                    Label("Open on GitHub", systemImage: "arrow.up.right.square")
+                                }
+                                .buttonStyle(.link)
+                                .font(.system(size: 10.5, weight: .semibold))
+                            }
+                        }
+                    } else {
+                        ContentUnavailableView(
+                            "No Release Notes",
+                            systemImage: "doc.text",
+                            description: Text(releaseNotes.lastError ?? "No notes were published for this build.")
+                        )
+                        .frame(minHeight: 120)
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(16)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.primary.opacity(0.025))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
         }
     }
 
@@ -167,32 +192,22 @@ struct ZestUpdateSettingsView: View {
             Text("Automatic Updates")
                 .font(.system(size: 12, weight: .semibold))
 
-            Toggle(
-                "Automatically check for Zest updates",
-                isOn: $automaticChecks
-            )
-            .onChange(of: automaticChecks) { _, newValue in
-                guard didLoadUpdaterPreferences else { return }
-                updateManager.automaticallyChecksForUpdates = newValue
-
-                if !newValue {
-                    automaticDownloads = false
-                    updateManager.automaticallyDownloadsUpdates = false
+            Toggle("Automatically check for Zest updates", isOn: $automaticChecks)
+                .onChange(of: automaticChecks) { _, value in
+                    guard didLoadUpdaterPreferences else { return }
+                    updateManager.automaticallyChecksForUpdates = value
+                    if !value {
+                        automaticDownloads = false
+                        updateManager.automaticallyDownloadsUpdates = false
+                    }
                 }
-            }
 
-            Toggle(
-                "Automatically download updates",
-                isOn: $automaticDownloads
-            )
-            .disabled(
-                !automaticChecks ||
-                !updateManager.allowsAutomaticUpdates
-            )
-            .onChange(of: automaticDownloads) { _, newValue in
-                guard didLoadUpdaterPreferences else { return }
-                updateManager.automaticallyDownloadsUpdates = newValue
-            }
+            Toggle("Automatically download updates", isOn: $automaticDownloads)
+                .disabled(!automaticChecks || !updateManager.allowsAutomaticUpdates)
+                .onChange(of: automaticDownloads) { _, value in
+                    guard didLoadUpdaterPreferences else { return }
+                    updateManager.automaticallyDownloadsUpdates = value
+                }
 
             Divider().opacity(0.45)
 
@@ -200,35 +215,22 @@ struct ZestUpdateSettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Update notifications")
                         .font(.system(size: 11, weight: .medium))
-                    Text("Allow Zest to notify you when a new version is available.")
+                    Text(notificationDescription)
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 }
-
                 Spacer()
-
-                Button("Allow") {
-                    UNUserNotificationCenter.current()
-                        .requestAuthorization(
-                            options: [.alert, .sound, .badge]
-                        ) { _, _ in }
-                }
+                notificationButton
             }
         }
         .padding(16)
         .background {
-            RoundedRectangle(
-                cornerRadius: 16,
-                style: .continuous
-            )
-            .fill(Color.primary.opacity(0.025))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.primary.opacity(0.025))
         }
         .overlay {
-            RoundedRectangle(
-                cornerRadius: 16,
-                style: .continuous
-            )
-            .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
         }
     }
 
@@ -236,66 +238,82 @@ struct ZestUpdateSettingsView: View {
     private var primaryAction: some View {
         switch updateManager.phase {
         case .idle, .upToDate, .failed:
-            Button {
-                updateManager.checkForUpdates()
-            } label: {
-                Label(
-                    "Check for Updates",
-                    systemImage: "arrow.clockwise"
-                )
+            Button { updateManager.checkForUpdates() } label: {
+                Label("Check for Updates", systemImage: "arrow.clockwise")
             }
-            .buttonStyle(
-                ZestSoftwareUpdatePrimaryButtonStyle(
-                    accent: accentColor
-                )
-            )
+            .buttonStyle(ZestPrimaryActionButtonStyle(accent: accentColor))
             .disabled(!updateManager.canCheckForUpdates)
 
         case .checking:
-            ProgressView()
-                .controlSize(.small)
+            ProgressView().controlSize(.small)
 
         case .available:
-            Button("Download & Install") {
-                updateManager.downloadAndPrepareUpdate()
+            Button { updateManager.downloadAndPrepareUpdate() } label: {
+                Label("Download & Install", systemImage: "arrow.down.circle.fill")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(accentColor)
+            .buttonStyle(ZestPrimaryActionButtonStyle(accent: accentColor))
 
         case .downloading:
-            Button("Cancel") {
-                updateManager.cancelCurrentOperation()
+            Button { updateManager.cancelCurrentOperation() } label: {
+                Label("Cancel", systemImage: "xmark.circle")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(ZestSecondaryActionButtonStyle())
 
         case .extracting:
-            ProgressView()
-                .controlSize(.small)
+            ProgressView().controlSize(.small)
 
         case .readyToInstall:
-            Button("Install & Relaunch") {
-                updateManager.installAndRelaunch()
+            Button { updateManager.installAndRelaunch() } label: {
+                Label("Install & Relaunch", systemImage: "arrow.clockwise.circle.fill")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(accentColor)
+            .buttonStyle(ZestPrimaryActionButtonStyle(accent: accentColor))
 
         case .installing:
-            ProgressView()
-                .controlSize(.small)
+            ProgressView().controlSize(.small)
+        }
+    }
+
+    private var notificationButton: some View {
+        Group {
+            switch notificationService.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                Label("Allowed", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            case .denied:
+                Button("Open Settings") { notificationService.openSystemNotificationSettings() }
+            case .notDetermined:
+                Button("Allow") {
+                    Task { _ = await notificationService.requestAuthorization() }
+                }
+            @unknown default:
+                Button("Allow") {
+                    Task { _ = await notificationService.requestAuthorization() }
+                }
+            }
+        }
+    }
+
+    private var notificationDescription: String {
+        switch notificationService.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return "Zest can notify you about software updates."
+        case .denied:
+            return "Notifications are disabled for Zest in System Settings."
+        case .notDetermined:
+            return "Allow Zest to notify you when a new version is available."
+        @unknown default:
+            return "Manage notification permission for Zest."
         }
     }
 
     private var downloadProgress: some View {
         VStack(alignment: .leading, spacing: 6) {
             ProgressView(value: updateManager.progress ?? 0)
-
             HStack {
                 Text(byteProgressText)
                 Spacer()
-
-                if let progress = updateManager.progress {
-                    Text("\(Int(progress * 100))%")
-                }
+                if let progress = updateManager.progress { Text("\(Int(progress * 100))%") }
             }
             .font(.system(size: 9.5, weight: .medium))
             .foregroundStyle(.secondary)
@@ -305,12 +323,9 @@ struct ZestUpdateSettingsView: View {
     private var extractionProgress: some View {
         VStack(alignment: .leading, spacing: 6) {
             ProgressView(value: updateManager.extractionProgress)
-
-            Text(
-                "Preparing update… \(Int(updateManager.extractionProgress * 100))%"
-            )
-            .font(.system(size: 9.5, weight: .medium))
-            .foregroundStyle(.secondary)
+            Text("Preparing update… \(Int(updateManager.extractionProgress * 100))%")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -330,165 +345,56 @@ struct ZestUpdateSettingsView: View {
 
     private var statusTitle: String {
         switch updateManager.phase {
-        case .idle:
-            return "Zest \(updateManager.installedVersion)"
-        case .checking:
-            return "Checking for updates…"
-        case .upToDate:
-            return "Zest is up to date"
-        case .available:
-            return "Zest \(updateManager.availableVersion ?? "") is available"
-        case .downloading:
-            return "Downloading Zest \(updateManager.availableVersion ?? "")"
-        case .extracting:
-            return "Preparing Zest \(updateManager.availableVersion ?? "")"
-        case .readyToInstall:
-            return "Ready to install"
-        case .installing:
-            return "Installing Zest…"
-        case .failed:
-            return "Software Update failed"
+        case .idle: return "Zest \(updateManager.installedVersion)"
+        case .checking: return "Checking for updates…"
+        case .upToDate: return "Zest is up to date"
+        case .available: return "Zest \(updateManager.availableVersion ?? "") is available"
+        case .downloading: return "Downloading Zest \(updateManager.availableVersion ?? "")"
+        case .extracting: return "Preparing Zest \(updateManager.availableVersion ?? "")"
+        case .readyToInstall: return "Ready to install"
+        case .installing: return "Installing Zest…"
+        case .failed: return "Software Update failed"
         }
     }
 
     private var statusSubtitle: String {
         switch updateManager.phase {
-        case .idle:
-            return "Installed build \(updateManager.installedBuild)."
-        case .checking:
-            return "Zest is contacting the update feed."
-        case .upToDate:
-            return "You’re running Zest \(updateManager.installedVersion) (\(updateManager.installedBuild))."
+        case .idle: return "Installed build \(updateManager.installedBuild)."
+        case .checking: return "Zest is contacting the update feed."
+        case .upToDate: return "You’re running Zest \(updateManager.installedVersion) (\(updateManager.installedBuild))."
         case .available:
-            if let build = updateManager.availableBuild {
-                return "Build \(build) is ready to download."
-            }
-            return "A newer version is ready to download."
-        case .downloading:
-            return byteProgressText
-        case .extracting:
-            return "The downloaded update is being verified and prepared."
-        case .readyToInstall:
-            return "Zest will close briefly, replace the application bundle, and reopen."
-        case .installing:
-            return "Your settings backup has already been created."
-        case .failed:
-            return updateManager.lastError ?? "An unknown updater error occurred."
+            return updateManager.availableBuild.map { "Build \($0) is ready to download." } ?? "A newer version is ready to download."
+        case .downloading: return byteProgressText
+        case .extracting: return "The downloaded update is being verified and prepared."
+        case .readyToInstall: return "Zest will close briefly, replace the application bundle, and reopen."
+        case .installing: return "Your settings backup has already been created."
+        case .failed: return updateManager.lastError ?? "An unknown updater error occurred."
         }
     }
 
     private var byteProgressText: String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
-
-        let received = formatter.string(
-            fromByteCount: Int64(updateManager.receivedDownloadBytes)
-        )
-
-        guard updateManager.expectedDownloadBytes > 0 else {
-            return received
-        }
-
-        let expected = formatter.string(
-            fromByteCount: Int64(updateManager.expectedDownloadBytes)
-        )
-
+        let received = formatter.string(fromByteCount: Int64(updateManager.receivedDownloadBytes))
+        guard updateManager.expectedDownloadBytes > 0 else { return received }
+        let expected = formatter.string(fromByteCount: Int64(updateManager.expectedDownloadBytes))
         return "\(received) of \(expected)"
     }
 
     private func loadUpdaterPreferences() {
-        automaticChecks =
-            updateManager.automaticallyChecksForUpdates
-
-        automaticDownloads =
-            updateManager.automaticallyDownloadsUpdates
-
+        automaticChecks = updateManager.automaticallyChecksForUpdates
+        automaticDownloads = updateManager.automaticallyDownloadsUpdates
         didLoadUpdaterPreferences = true
     }
 
-    private func stripSimpleHTML(_ source: String) -> String {
-        source
-            .replacingOccurrences(
-                of: "<[^>]+>",
-                with: "",
-                options: .regularExpression
+    private func loadReleaseNotes() {
+        let version = updateManager.availableVersion ?? updateManager.installedVersion
+        Task {
+            await releaseNotes.load(
+                releaseURL: updateManager.releaseNotesURL,
+                installedOrAvailableVersion: version,
+                fallbackText: updateManager.releaseNotesText
             )
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .replacingOccurrences(of: "&lt;", with: "<")
-            .replacingOccurrences(of: "&gt;", with: ">")
-            .replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&#39;", with: "'")
-    }
-    
-    private struct ZestSoftwareUpdatePrimaryButtonStyle:
-        ButtonStyle {
-
-        let accent: Color
-
-        func makeBody(
-            configuration: Configuration
-        ) -> some View {
-
-            configuration.label
-                .font(
-                    .system(
-                        size: 12,
-                        weight: .bold,
-                        design: .rounded
-                    )
-                )
-                .foregroundStyle(.white)
-                .padding(.horizontal, 18)
-                .frame(height: 38)
-                .background {
-                    Capsule()
-                        .fill(
-                            accent.opacity(
-                                configuration.isPressed ? 0.68 : 0.86
-                            )
-                        )
-                        .glassEffect(
-                            .regular.tint(
-                                accent.opacity(
-                                    configuration.isPressed ? 0.20 : 0.30
-                                )
-                            ),
-                            in: Capsule()
-                        )
-                        .overlay {
-                            Capsule()
-                                .stroke(
-                                    Color.white.opacity(
-                                        configuration.isPressed ? 0.22 : 0.40
-                                    ),
-                                    lineWidth: 0.8
-                                )
-                        }
-                        .shadow(
-                            color: accent.opacity(
-                                configuration.isPressed ? 0.14 : 0.32
-                            ),
-                            radius: configuration.isPressed ? 6 : 12,
-                            y: 3
-                        )
-                        .shadow(
-                            color: Color.black.opacity(
-                                configuration.isPressed ? 0.07 : 0.13
-                            ),
-                            radius: 6,
-                            y: 3
-                        )
-                }
-                .scaleEffect(
-                    configuration.isPressed ? 0.97 : 1
-                )
-                .animation(
-                    .spring(
-                        response: 0.18,
-                        dampingFraction: 0.82
-                    ),
-                    value: configuration.isPressed
-                )
         }
     }
 }

@@ -6,6 +6,7 @@
 import SwiftUI
 import AppKit
 import Carbon
+import CoreGraphics
 
 
 // MARK: - Native Global Hot Keys
@@ -14,15 +15,46 @@ private extension Notification.Name {
     static let zestCarbonShowZest = Notification.Name("zest.hotkey.showZest")
     static let zestCarbonPreviousInput = Notification.Name("zest.hotkey.previousInput")
     static let zestCarbonNextInput = Notification.Name("zest.hotkey.nextInput")
+    static let zestCarbonLayoutFixLeader = Notification.Name("zest.hotkey.layoutFixLeader")
+    static let zestCarbonLayoutFixTarget = Notification.Name("zest.hotkey.layoutFixTarget")
+    static let zestLayoutFixDigitTapped = Notification.Name("zest.layoutFix.digitTapped")
 }
 
 private enum ZestRegisteredHotKeyID: UInt32 {
     case showZest = 1
     case previousInputSource = 2
     case nextInputSource = 3
+    case layoutFixLeader = 4
 }
 
 private let zestHotKeySignature: OSType = 0x5A455354 // 'ZEST'
+
+private let zestLayoutFixDigitKeyCodes: Set<UInt16> = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+
+// Layout Fix only needs raw 1–9 key interception for the short armed window.
+// Keep this callback stateless and bounce the key code back to the main actor.
+private let zestLayoutFixDigitTapCallback: CGEventTapCallBack = { _, type, event, _ in
+    guard type == .keyDown else {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+    if zestLayoutFixDigitKeyCodes.contains(keyCode) || keyCode == 53 {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .zestLayoutFixDigitTapped,
+                object: nil,
+                userInfo: ["keyCode": NSNumber(value: keyCode)]
+            )
+        }
+        // Swallow the target digit / Escape so the selected text is not altered
+        // before Layout Fix replaces it.
+        return nil
+    }
+
+    return Unmanaged.passUnretained(event)
+}
 
 // Carbon invokes this callback from the application event loop. Keep it free of
 // app state and bounce back onto the main queue through notifications.
@@ -40,6 +72,9 @@ private let zestCarbonHotKeyHandler: EventHandlerUPP = { _, event, _ in
         &hotKeyID
     )
     guard status == noErr else { return status }
+    guard hotKeyID.signature == zestHotKeySignature else {
+        return OSStatus(eventNotHandledErr)
+    }
 
     let name: Notification.Name
     switch hotKeyID.id {
@@ -49,6 +84,17 @@ private let zestCarbonHotKeyHandler: EventHandlerUPP = { _, event, _ in
         name = .zestCarbonPreviousInput
     case ZestRegisteredHotKeyID.nextInputSource.rawValue:
         name = .zestCarbonNextInput
+    case ZestRegisteredHotKeyID.layoutFixLeader.rawValue:
+        name = .zestCarbonLayoutFixLeader
+    case 100...299:
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .zestCarbonLayoutFixTarget,
+                object: nil,
+                userInfo: ["hotKeyID": hotKeyID.id]
+            )
+        }
+        return noErr
     default:
         return OSStatus(eventNotHandledErr)
     }
@@ -77,13 +123,25 @@ final class ZestAppDelegate:
     private var showZestHotKey: EventHotKeyRef?
     private var previousInputHotKey: EventHotKeyRef?
     private var nextInputHotKey: EventHotKeyRef?
+    private var layoutFixLeaderHotKey: EventHotKeyRef?
+    private var layoutFixTargetHotKeys: [EventHotKeyRef] = []
+    private var layoutFixTargetByHotKeyID: [UInt32: ZestLayoutFixTarget] = [:]
+    private var layoutFixTargetByKeyCode: [UInt16: ZestLayoutFixTarget] = [:]
+    private var layoutFixDigitTap: CFMachPort?
+    private var layoutFixDigitTapSource: CFRunLoopSource?
+    private var layoutFixSourceApplication: NSRunningApplication?
+    private var layoutFixCaptureTask: Task<Void, Never>?
+    private var layoutFixArmTimeout: DispatchWorkItem?
     private var hotKeyObservers: [NSObjectProtocol] = []
     private let saturnHUD = ZestSaturnHUDController()
+    private let layoutFixHUD = ZestLayoutFixHUDController.shared
     private let rapidInputSourceManager = InputSourceManager()
     private var menuBarController: ZestMenuBarController?
     let settingsManager = ZestSettingsManager()
     private var keyboardAssistantController: ZestKeyboardAssistantController?
     private var onboardingWindowController: ZestOnboardingWindowController?
+    private var postUpdateWelcomeController: ZestPostUpdateWelcomeController?
+    private var layoutFixServicesProvider: ZestLayoutFixServicesProvider?
 
     // Global key monitors see every key press on the Mac. Keep the tiny hot
     // path allocation-free: shortcuts are decoded only when defaults change,
@@ -92,6 +150,11 @@ final class ZestAppDelegate:
     private var cachedPreviousShortcut: ZestKeyboardShortcut?
     private var cachedNextShortcut: ZestKeyboardShortcut?
     private var cachedShowZestShortcut: ZestKeyboardShortcut = .defaultShowZest
+    private var cachedLayoutFixEnabled = true
+    private var cachedLayoutFixLeaderShortcut = ZestKeyboardShortcut(
+        keyCode: 37, command: false, option: false, control: true, shift: true
+    )
+    private var cachedLayoutFixTargets: [ZestLayoutFixTarget] = []
     private var defaultsObserver: NSObjectProtocol?
 
 
@@ -142,12 +205,41 @@ final class ZestAppDelegate:
         if arguments.contains("--reset-onboarding") {
             settingsManager.resetOnboardingState()
         }
-        if !settingsManager.hasCompletedOnboarding || arguments.contains("--show-onboarding") {
-            DispatchQueue.main.async { onboarding.show(force: arguments.contains("--show-onboarding")) }
+
+        let forceOnboarding = arguments.contains("--show-onboarding")
+        if !settingsManager.hasCompletedOnboarding || forceOnboarding {
+            ZestPostUpdateTracker.shared.seedCurrentBuildIfNeeded()
+            DispatchQueue.main.async { onboarding.show(force: forceOnboarding) }
+        } else if ZestPostUpdateTracker.shared.shouldShowAfterUpdate(
+            hasCompletedOnboarding: settingsManager.hasCompletedOnboarding
+        ) {
+            let postUpdate = ZestPostUpdateWelcomeController(
+                settingsManager: settingsManager,
+                onDismiss: { [weak self] in
+                    self?.finishLaunchFeedback(afterUpdate: true)
+                }
+            )
+            postUpdateWelcomeController = postUpdate
+            DispatchQueue.main.async { postUpdate.show() }
+        } else {
+            finishLaunchFeedback(afterUpdate: false)
         }
 
-        textContextManager
-            .requestAccessibilityPermission()
+        // Accessibility is checked silently at launch. Zest only asks macOS to
+        // show its permission UI after an explicit user action in onboarding,
+        // Settings, or an Accessibility-dependent feature.
+        ZestAccessibilityService.shared.refreshStatus()
+        textContextManager.startAutomaticMonitoring()
+
+        // Native macOS Services are now the primary transport for Layout Fix.
+        // The source application owns the selection and hands it to Zest through
+        // the Services pasteboard, then reads Zest's returned text back into the
+        // same selection. This avoids AX selection scraping and synthetic Copy/Paste.
+        let servicesProvider = ZestLayoutFixServicesProvider(settingsManager: settingsManager)
+        layoutFixServicesProvider = servicesProvider
+        NSApp.servicesProvider = servicesProvider
+        NSUpdateDynamicServices()
+        print("⌨️ LAYOUT FIX SERVICES → provider registered")
 
         installHotKeyObservers()
         refreshShortcutCache()
@@ -179,6 +271,24 @@ final class ZestAppDelegate:
         print("")
     }
 
+
+    private func finishLaunchFeedback(afterUpdate: Bool) {
+        Task { @MainActor in
+            let notifications = ZestNotificationService.shared
+            await notifications.presentLaunchPermissionExplanationIfNeeded()
+
+            if afterUpdate {
+                await notifications.deliverUpdateInstalled(
+                    version: ZestPostUpdateTracker.shared.currentVersion,
+                    build: ZestPostUpdateTracker.shared.currentBuild
+                )
+            }
+
+            if settingsManager.notifyWhenZestStarts {
+                await notifications.deliverLaunchNotification()
+            }
+        }
+    }
 
     // Keep Zest alive as a menu-bar utility even when every ordinary window is closed
     // or another application becomes active. The NSStatusItem is owned for the full
@@ -221,6 +331,19 @@ final class ZestAppDelegate:
         let center = NotificationCenter.default
 
         hotKeyObservers.append(
+            center.addObserver(
+                forName: .zestAccessibilityStatusDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    guard ZestAccessibilityService.shared.isTrusted else { return }
+                    self?.textContextManager.startAutomaticMonitoring()
+                }
+            }
+        )
+
+        hotKeyObservers.append(
             center.addObserver(forName: .zestCarbonShowZest, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.keyboardAssistantController?.toggle() }
             }
@@ -233,6 +356,47 @@ final class ZestAppDelegate:
         hotKeyObservers.append(
             center.addObserver(forName: .zestCarbonNextInput, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.performRapidInputSwitch(direction: 1) }
+            }
+        )
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestCarbonLayoutFixLeader, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.armLayoutFixTargets() }
+            }
+        )
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestLayoutFixConfigurationDidSave, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshShortcutCache()
+                    self?.registerConfiguredHotKeys()
+                    print("⌨️ LAYOUT FIX HOTKEYS REBOUND AFTER SAVE")
+                }
+            }
+        )
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestCarbonLayoutFixTarget, object: nil, queue: .main) { [weak self] note in
+                let id: UInt32?
+                if let raw = note.userInfo?["hotKeyID"] as? UInt32 {
+                    id = raw
+                } else if let number = note.userInfo?["hotKeyID"] as? NSNumber {
+                    id = number.uint32Value
+                } else {
+                    id = nil
+                }
+                guard let id else { return }
+                Task { @MainActor in self?.performLayoutFixTarget(hotKeyID: id) }
+            }
+        )
+        hotKeyObservers.append(
+            center.addObserver(forName: .zestLayoutFixDigitTapped, object: nil, queue: .main) { [weak self] note in
+                guard let number = note.userInfo?["keyCode"] as? NSNumber else { return }
+                let keyCode = UInt16(number.uint16Value)
+                Task { @MainActor in
+                    if keyCode == 53 {
+                        self?.clearLayoutFixTargetHotKeys()
+                    } else {
+                        self?.performLayoutFixTarget(keyCode: keyCode)
+                    }
+                }
             }
         )
     }
@@ -282,6 +446,26 @@ final class ZestAppDelegate:
         cachedNextShortcut = decoded("zest.settings.saturnNextShortcut")
             ?? ZestKeyboardShortcut(keyCode: 124, command: false, option: true, control: true, shift: false)
         cachedShowZestShortcut = decoded("zest.settings.showZestShortcut") ?? .defaultShowZest
+
+        cachedLayoutFixEnabled =
+            defaults.object(forKey: "zest.settings.layoutFixEnabled") == nil
+            ? true
+            : defaults.bool(forKey: "zest.settings.layoutFixEnabled")
+        cachedLayoutFixLeaderShortcut =
+            decoded("zest.settings.layoutFixLeaderShortcut")
+            ?? ZestKeyboardShortcut(
+                keyCode: 37,
+                command: false,
+                option: false,
+                control: true,
+                shift: true
+            )
+        if let data = defaults.data(forKey: "zest.settings.layoutFixTargets"),
+           let decodedTargets = try? JSONDecoder().decode([ZestLayoutFixTarget].self, from: data) {
+            cachedLayoutFixTargets = decodedTargets
+        } else {
+            cachedLayoutFixTargets = []
+        }
     }
 
     private func registerConfiguredHotKeys() {
@@ -298,6 +482,12 @@ final class ZestAppDelegate:
                 nextInputHotKey = registerHotKey(shortcut, id: .nextInputSource)
             }
         }
+
+        // v25: Layout Fix selection transport is provided by native macOS
+        // Services. Do not register the legacy leader hotkey here; it cannot
+        // invoke another application's Services responder chain and would only
+        // route users back into the retired AX/clipboard capture experiment.
+        layoutFixLeaderHotKey = nil
     }
 
     private func registerHotKey(
@@ -337,9 +527,227 @@ final class ZestAppDelegate:
         if let showZestHotKey { UnregisterEventHotKey(showZestHotKey) }
         if let previousInputHotKey { UnregisterEventHotKey(previousInputHotKey) }
         if let nextInputHotKey { UnregisterEventHotKey(nextInputHotKey) }
+        if let layoutFixLeaderHotKey { UnregisterEventHotKey(layoutFixLeaderHotKey) }
+        clearLayoutFixTargetHotKeys()
         showZestHotKey = nil
         previousInputHotKey = nil
         nextInputHotKey = nil
+        layoutFixLeaderHotKey = nil
+    }
+
+    private func registerRawHotKey(
+        keyCode: UInt16,
+        modifiers: UInt32,
+        id: UInt32
+    ) -> EventHotKeyRef? {
+        var reference: EventHotKeyRef?
+        let identifier = EventHotKeyID(signature: zestHotKeySignature, id: id)
+        let status = RegisterEventHotKey(
+            UInt32(keyCode),
+            modifiers,
+            identifier,
+            GetApplicationEventTarget(),
+            0,
+            &reference
+        )
+        if status != noErr {
+            print("⌨️ LAYOUT FIX TARGET HOTKEY ERROR → keyCode", keyCode, "modifiers", modifiers, "status", status)
+            return nil
+        }
+        return reference
+    }
+
+    private func armLayoutFixTargets() {
+        guard cachedLayoutFixEnabled else { return }
+
+        clearLayoutFixTargetHotKeys()
+
+        // The leader stage must always be visible first. Context capture is a
+        // downstream concern and must never be allowed to make the global
+        // shortcut appear dead.
+        layoutFixHUD.showArmed()
+        print("⌨️ LAYOUT FIX LEADER → fired; targets:", cachedLayoutFixTargets.count)
+
+        guard !cachedLayoutFixTargets.isEmpty else {
+            layoutFixHUD.showFailure(message: "Configure targets")
+            return
+        }
+
+        layoutFixCaptureTask?.cancel()
+        layoutFixCaptureTask = nil
+
+        if let application = NSWorkspace.shared.frontmostApplication,
+           application.bundleIdentifier != Bundle.main.bundleIdentifier {
+            layoutFixSourceApplication = application
+
+            // Freeze the selection at leader time while the source application
+            // still owns focus. The number stage chooses only the destination.
+            layoutFixCaptureTask = Task { @MainActor in
+                await ZestKeyboardLayoutFixService.shared
+                    .primeExternalSelectionBeforeActivation(from: application)
+            }
+
+            print("⌨️ LAYOUT FIX SOURCE →", application.localizedName ?? "<unknown>")
+        } else {
+            // Do not abort the armed state. The service also remembers the last
+            // external editor and the target stage can fall back to that context.
+            layoutFixSourceApplication = nil
+            print("⌨️ LAYOUT FIX SOURCE → frontmost app unavailable; keeping armed state")
+        }
+
+        let leaderModifiers = carbonModifiers(for: cachedLayoutFixLeaderShortcut)
+
+        for (index, target) in cachedLayoutFixTargets.enumerated() {
+            layoutFixTargetByKeyCode[target.triggerKeyCode] = target
+
+            // Carbon registrations remain as a fallback. The temporary event tap
+            // below is the primary target-key path because it can swallow the digit
+            // and preserve the selected text.
+            let bareID = UInt32(100 + index)
+            if let ref = registerRawHotKey(
+                keyCode: target.triggerKeyCode,
+                modifiers: 0,
+                id: bareID
+            ) {
+                layoutFixTargetHotKeys.append(ref)
+                layoutFixTargetByHotKeyID[bareID] = target
+            }
+
+            let heldID = UInt32(200 + index)
+            if let ref = registerRawHotKey(
+                keyCode: target.triggerKeyCode,
+                modifiers: leaderModifiers,
+                id: heldID
+            ) {
+                layoutFixTargetHotKeys.append(ref)
+                layoutFixTargetByHotKeyID[heldID] = target
+            }
+        }
+
+        installLayoutFixDigitTap()
+
+        let timeout = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                self?.layoutFixHUD.showFailure(message: "Timed out")
+                self?.clearLayoutFixTargetHotKeys()
+            }
+        }
+        layoutFixArmTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: timeout)
+    }
+
+    private func installLayoutFixDigitTap() {
+        stopLayoutFixDigitTap()
+
+        let mask = CGEventMask(1) << CGEventType.keyDown.rawValue
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: zestLayoutFixDigitTapCallback,
+            userInfo: nil
+        ) else {
+            print("⌨️ LAYOUT FIX DIGIT TAP → unavailable; Carbon target fallback remains active")
+            return
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        layoutFixDigitTap = tap
+        layoutFixDigitTapSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        print("⌨️ LAYOUT FIX DIGIT TAP → armed")
+    }
+
+    private func stopLayoutFixDigitTap() {
+        if let tap = layoutFixDigitTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = layoutFixDigitTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        layoutFixDigitTap = nil
+        layoutFixDigitTapSource = nil
+    }
+
+    private func performLayoutFixTarget(hotKeyID: UInt32) {
+        guard let target = layoutFixTargetByHotKeyID[hotKeyID] else { return }
+        performLayoutFixTarget(target: target)
+    }
+
+    private func performLayoutFixTarget(keyCode: UInt16) {
+        guard let target = layoutFixTargetByKeyCode[keyCode] else { return }
+        performLayoutFixTarget(target: target)
+    }
+
+    private func performLayoutFixTarget(target: ZestLayoutFixTarget) {
+        let application = layoutFixSourceApplication ?? NSWorkspace.shared.frontmostApplication
+        guard let application,
+              application.bundleIdentifier != Bundle.main.bundleIdentifier
+        else {
+            layoutFixHUD.showFailure(message: "No source app")
+            clearLayoutFixTargetHotKeys()
+            return
+        }
+
+        rapidInputSourceManager.refresh()
+        let sources = rapidInputSourceManager.sources
+        let preferredSourceID = rapidInputSourceManager.currentSource?.id
+        let targetSource = rapidInputSourceManager.source(withID: target.inputSourceID)
+        let targetCode = targetSource?.shortLabel ?? "…"
+        let targetName = targetSource?.name ?? "Layout"
+
+        // Transition immediately from the armed ellipsis to the requested source.
+        layoutFixHUD.showPending(targetCode: targetCode, targetName: targetName)
+        clearLayoutFixTargetHotKeys(preserveHUD: true)
+
+        Task { @MainActor in
+            // If leader-time clipboard capture is still completing, wait for it
+            // before attempting the mapping. This keeps the selected text frozen
+            // across the leader -> digit transition.
+            if let captureTask = layoutFixCaptureTask {
+                await captureTask.value
+                layoutFixCaptureTask = nil
+            }
+
+            guard let result = await ZestKeyboardLayoutFixService.shared.performShortcutFix(
+                target: target,
+                from: application,
+                installedSources: sources,
+                preferredSourceID: preferredSourceID
+            ) else {
+                layoutFixHUD.showFailure(message: "No selected text")
+                return
+            }
+
+            if let targetSource {
+                rapidInputSourceManager.select(targetSource)
+            }
+
+            layoutFixHUD.show(
+                targetCode: result.targetCode,
+                targetName: result.targetName
+            )
+        }
+    }
+
+    private func clearLayoutFixTargetHotKeys(preserveHUD: Bool = false) {
+        layoutFixArmTimeout?.cancel()
+        layoutFixArmTimeout = nil
+        stopLayoutFixDigitTap()
+
+        for ref in layoutFixTargetHotKeys {
+            UnregisterEventHotKey(ref)
+        }
+        layoutFixTargetHotKeys.removeAll()
+        layoutFixTargetByHotKeyID.removeAll()
+        layoutFixTargetByKeyCode.removeAll()
+        layoutFixSourceApplication = nil
+
+        if !preserveHUD {
+            // The HUD owns its own dismissal timer. Nothing else to do here.
+        }
     }
 
     private func performRapidInputSwitch(direction: Int) {

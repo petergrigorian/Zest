@@ -106,6 +106,7 @@ private enum ZestOnboardingMotion {
 
 struct ZestOnboardingView: View {
     @ObservedObject var settingsManager: ZestSettingsManager
+    @ObservedObject private var accessibilityService = ZestAccessibilityService.shared
     let close: () -> Void
     @State private var page = 0
     @State private var assembled = false
@@ -329,11 +330,21 @@ struct ZestOnboardingView: View {
         VStack(spacing: 26) {
             onboardingHeader("A couple of permissions.", "Zest uses macOS accessibility services to work with the app you're already using.")
             VStack(spacing: 12) {
-                permissionRow("Accessibility", "Allows Zest to read the active text context and insert changes.", granted: AXIsProcessTrusted()) {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+                permissionRow(
+                    "Accessibility",
+                    "Allows Zest to read the active text context, follow the caret, and insert changes.",
+                    granted: accessibilityService.isTrusted,
+                    actionTitle: "Allow Access"
+                ) {
+                    accessibilityService.requestAccess()
                 }
                 .opacity(permissionRevealCount > 0 ? 1 : 0).scaleEffect(permissionRevealCount > 0 ? 1 : 0.94)
-                permissionRow("Automation", "Some app-specific controls may ask for Automation access when first used.", granted: false) {
+                permissionRow(
+                    "Automation",
+                    "Some app-specific controls may ask for Automation access when first used.",
+                    granted: false,
+                    actionTitle: "Open Settings"
+                ) {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") { NSWorkspace.shared.open(url) }
                 }
                 .opacity(permissionRevealCount > 1 ? 1 : 0).scaleEffect(permissionRevealCount > 1 ? 1 : 0.94)
@@ -399,7 +410,7 @@ struct ZestOnboardingView: View {
                             productionFormPreview(factor).frame(height: 105)
                             Text(factor.title).font(.system(size: 14, weight: .bold))
                             Text(factor.subtitle).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
-                        }.frame(width: 215, height: 190)
+                        }.frame(width: 178, height: 190)
                             .background(RoundedRectangle(cornerRadius: 22).fill(factor == settingsManager.formFactor ? accent.opacity(0.10) : Color.primary.opacity(0.025)).glassEffect(.regular.tint(accent.opacity(factor == settingsManager.formFactor ? 0.10 : 0.025)), in: RoundedRectangle(cornerRadius: 22)))
                             .overlay(RoundedRectangle(cornerRadius: 22).stroke(factor == settingsManager.formFactor ? accent.opacity(0.55) : Color.white.opacity(0.3), lineWidth: 1))
                     }
@@ -480,8 +491,8 @@ struct ZestOnboardingView: View {
         switch settingsManager.formFactor {
         case .orangeSlice:
             return 5
-        case .centerOnly:
-            // Language Turntable has four focused lessons. The 2/4 Split modes
+        case .centerOnly, .turntable:
+            // Turntable / Center Only share the compact circular onboarding family. The 2/4 Split modes
             // additionally teach feature popups before Settings/menu bar/HUD.
             return settingsManager.centerOnlyPage == "language" ? 4 : 5
         case .tripleSquare:
@@ -499,7 +510,7 @@ struct ZestOnboardingView: View {
         // Center Only / Language Turntable has its own guide. It intentionally
         // does NOT inherit the Orange Slice popup lesson because this form
         // factor has no feature-popup interaction in language mode.
-        if settingsManager.formFactor == .centerOnly {
+        if settingsManager.formFactor == .centerOnly || settingsManager.formFactor == .turntable {
             if settingsManager.centerOnlyPage == "language" {
                 centerOnlyGuideScene
             } else {
@@ -587,7 +598,7 @@ struct ZestOnboardingView: View {
         pressedFeatureIndex: Int? = nil,
         settingsPressed: Bool = false
     ) -> some View {
-        ZestTripleTileControl(
+        ZestV34TripleTileControl(
             features: tripleGuideFeatures,
             featureColors: tripleGuideColors,
             accentColor: settingsManager.accentColor,
@@ -822,7 +833,7 @@ struct ZestOnboardingView: View {
         pressedFeatureIndex: Int? = nil,
         settingsPressed: Bool = false
     ) -> some View {
-        ZestCenterOnlySplitView(
+        ZestV34CenterOnlySplitView(
             features: centerOnlySplitGuideFeatures,
             count: centerOnlySplitGuideCount,
             featureColors: centerOnlySplitGuideColors,
@@ -920,7 +931,7 @@ struct ZestOnboardingView: View {
                 // EXACT shared production renderer used by ContentView's live
                 // Center Only language mode. The guide only scales it up and
                 // drives its existing language-rotation parameters.
-                ZestCenterOnlyLanguageTurntable(
+                ZestV34CenterOnlyLanguageTurntable(
                     accentColor: settingsManager.accentColor,
                     accentBrightColor: settingsManager.accentBrightColor,
                     accentHighlightColor: settingsManager.accentHighlightColor,
@@ -959,7 +970,7 @@ struct ZestOnboardingView: View {
     private var guideCenterOnlySettingsScene: some View {
         VStack(spacing: 8) {
             ZStack {
-                ZestCenterOnlyLanguageTurntable(
+                ZestV34CenterOnlyLanguageTurntable(
                     accentColor: settingsManager.accentColor,
                     accentBrightColor: settingsManager.accentBrightColor,
                     accentHighlightColor: settingsManager.accentHighlightColor,
@@ -1016,7 +1027,7 @@ struct ZestOnboardingView: View {
                 .scaleEffect(guidePressed ? 0.84 : 1)
         }
         .overlay(alignment: .bottom) {
-            Text(settingsManager.formFactor == .centerOnly ? "Click the center gear to open Settings." : "Click the Settings tile to open Settings.")
+            Text((settingsManager.formFactor == .centerOnly || settingsManager.formFactor == .turntable) ? "Click the center gear to open Settings." : "Click the Settings tile to open Settings.")
                 .font(.system(size: 13, weight: .semibold))
                 .offset(y: 18)
         }
@@ -1128,7 +1139,7 @@ struct ZestOnboardingView: View {
             return
         }
 
-        if settingsManager.formFactor == .centerOnly {
+        if settingsManager.formFactor == .centerOnly || settingsManager.formFactor == .turntable {
             if settingsManager.centerOnlyPage == "language" {
                 runCenterOnlyGuideAnimation(later)
             } else {
@@ -1491,11 +1502,36 @@ struct ZestOnboardingView: View {
             onboardingHeader("Zest is ready.", "Press \(settingsManager.showZestShortcut.displayString) anytime to bring it up.")
             HStack(spacing: 12) {
                 Button("Open Settings") {
-                    settingsManager.completeOnboarding(); close(); openSettings()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { focusSettingsWindow() }
-                }.buttonStyle(ZestOnboardingSecondaryButton())
-                Button("Start Using Zest  →") { settingsManager.completeOnboarding(); close() }.buttonStyle(ZestOnboardingPrimaryButton(accent: accent))
+                    finishOnboarding(openSettingsAfter: true)
+                }
+                .buttonStyle(ZestOnboardingSecondaryButton())
+
+                Button("Start Using Zest  →") {
+                    finishOnboarding(openSettingsAfter: false)
+                }
+                .buttonStyle(ZestOnboardingPrimaryButton(accent: accent))
             }; Spacer()
+        }
+    }
+
+    private func finishOnboarding(openSettingsAfter: Bool) {
+        settingsManager.completeOnboarding()
+        ZestPostUpdateTracker.shared.acknowledgeCurrentBuild()
+        close()
+
+        if openSettingsAfter {
+            openSettings()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                focusSettingsWindow()
+            }
+        }
+
+        Task { @MainActor in
+            let notifications = ZestNotificationService.shared
+            await notifications.presentLaunchPermissionExplanationIfNeeded()
+            if settingsManager.notifyWhenZestStarts {
+                await notifications.deliverLaunchNotification()
+            }
         }
     }
 
@@ -1565,11 +1601,41 @@ struct ZestOnboardingView: View {
     }
     private func onboardingHeader(_ title: String, _ subtitle: String) -> some View { VStack(spacing: 7) { Text(title).font(.system(size: 28, weight: .bold, design: .rounded)).multilineTextAlignment(.center); Text(subtitle).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 650) } }
     private func featureCard(_ title: String, _ text: String, _ symbol: String) -> some View { VStack(alignment: .leading, spacing: 12) { Image(systemName: symbol).font(.system(size: 22, weight: .semibold)).foregroundStyle(accent); Text(title).font(.system(size: 14, weight: .bold)); Text(text).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true); Spacer() }.padding(18).frame(width: 245, height: 170).background(RoundedRectangle(cornerRadius: 20).fill(Color.primary.opacity(0.025)).glassEffect(.regular.tint(accent.opacity(0.045)), in: RoundedRectangle(cornerRadius: 20))) }
-    private func permissionRow(_ title: String, _ detail: String, granted: Bool, action: @escaping () -> Void) -> some View { HStack(spacing: 14) { Image(systemName: granted ? "checkmark.circle.fill" : "circle.dashed").font(.system(size: 22)).foregroundStyle(granted ? accent : .secondary); VStack(alignment: .leading, spacing: 3) { Text(title).font(.system(size: 13, weight: .bold)); Text(detail).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary) }; Spacer(); Button(granted ? "Allowed" : "Show Me", action: action).buttonStyle(.bordered).disabled(granted) }.padding(15).background(RoundedRectangle(cornerRadius: 16).fill(Color.primary.opacity(0.025))) }
+    private func permissionRow(
+        _ title: String,
+        _ detail: String,
+        granted: Bool,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: granted ? "checkmark.circle.fill" : "circle.dashed")
+                .font(.system(size: 22))
+                .foregroundStyle(granted ? accent : .secondary)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .bold))
+                Text(detail)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(granted ? "Allowed" : actionTitle, action: action)
+                .buttonStyle(.bordered)
+                .disabled(granted)
+        }
+        .padding(15)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.primary.opacity(0.025))
+        )
+    }
 
     private enum RevealKind { case features, permissions, forms }
     private func runStaggeredReveal(kind: RevealKind) {
-        if reduceMotion { featureRevealCount = 4; permissionRevealCount = 3; formRevealCount = 3; return }
+        if reduceMotion { featureRevealCount = 4; permissionRevealCount = 3; formRevealCount = ZestFormFactor.allCases.count; return }
         switch kind {
         case .features:
             featureRevealCount = 0
@@ -1579,7 +1645,7 @@ struct ZestOnboardingView: View {
             for i in 1...3 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.10 * Double(i - 1)) { withAnimation(.spring(response: 0.34, dampingFraction: 0.80)) { permissionRevealCount = i } } }
         case .forms:
             formRevealCount = 0
-            for i in 1...3 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.10 * Double(i - 1)) { withAnimation(.spring(response: 0.34, dampingFraction: 0.80)) { formRevealCount = i } } }
+            for i in 1...ZestFormFactor.allCases.count { DispatchQueue.main.asyncAfter(deadline: .now() + 0.10 * Double(i - 1)) { withAnimation(.spring(response: 0.34, dampingFraction: 0.80)) { formRevealCount = i } } }
         }
     }
 
@@ -1590,7 +1656,7 @@ struct ZestOnboardingView: View {
     }
 
     private func productionMiniSlice(scale: CGFloat) -> some View {
-        ZestMiniSlicePreview(accentColor: accent, accentHighlightColor: settingsManager.accentHighlightColor, accentDeepColor: settingsManager.accentDeepColor)
+        ZestV34MiniSlicePreview(accentColor: accent, accentHighlightColor: settingsManager.accentHighlightColor, accentDeepColor: settingsManager.accentDeepColor)
             .scaleEffect(scale)
             .frame(width: 90 * scale, height: 90 * scale)
     }
@@ -1599,31 +1665,41 @@ struct ZestOnboardingView: View {
         switch factor {
         case .orangeSlice: productionMiniSlice(scale: 1.0)
         case .centerOnly: productionMiniCenterPreview
+        case .turntable: productionMiniTurntablePreview
         case .tripleSquare: productionMiniTriplePreview
         }
     }
 
-    @ViewBuilder private var productionMiniCenterPreview: some View {
-        if settingsManager.centerOnlyPage == "language" {
-            ZestCenterOnlyLanguageTurntable(
-                accentColor: settingsManager.accentColor,
-                accentBrightColor: settingsManager.accentBrightColor,
-                accentHighlightColor: settingsManager.accentHighlightColor,
-                accentDeepColor: settingsManager.accentDeepColor,
-                rearGlassPrimaryColor: settingsManager.rearGlassPrimaryColor,
-                rearGlassBrightColor: settingsManager.rearGlassBrightColor,
-                shortLabel: "EN",
-                sourceName: "English"
-            )
-            .scaleEffect(0.58)
-            .frame(width: 104, height: 88)
-        } else {
-            productionCenterOnlySplit()
-                .scaleEffect(0.82)
-                .frame(width: 104, height: 88)
-        }
+    private var productionMiniCenterPreview: some View {
+        ZestV34CenterOnlyTopThreeView(
+            features: [.clipboard, .emoji, .symbols],
+            featureColors: [accent, accent, accent],
+            displayKind: .clock,
+            accentColor: settingsManager.accentColor,
+            accentBrightColor: settingsManager.accentBrightColor,
+            accentHighlightColor: settingsManager.accentHighlightColor,
+            accentDeepColor: settingsManager.accentDeepColor,
+            diameter: 74
+        )
+        .allowsHitTesting(false)
+        .frame(width: 104, height: 88)
     }
 
+    private var productionMiniTurntablePreview: some View {
+        ZestV34CenterOnlyLanguageTurntable(
+            accentColor: settingsManager.accentColor,
+            accentBrightColor: settingsManager.accentBrightColor,
+            accentHighlightColor: settingsManager.accentHighlightColor,
+            accentDeepColor: settingsManager.accentDeepColor,
+            rearGlassPrimaryColor: settingsManager.rearGlassPrimaryColor,
+            rearGlassBrightColor: settingsManager.rearGlassBrightColor,
+            shortLabel: "EN",
+            sourceName: "ABC"
+        )
+        .scaleEffect(0.58)
+        .allowsHitTesting(false)
+        .frame(width: 104, height: 88)
+    }
 
 
     private var productionMiniTriplePreview: some View {
@@ -1637,6 +1713,7 @@ struct ZestOnboardingView: View {
         switch settingsManager.formFactor {
         case .orangeSlice: productionMiniSlice(scale: 1.65)
         case .centerOnly: productionMiniCenterPreview.scaleEffect(1.35)
+        case .turntable: productionMiniTurntablePreview.scaleEffect(1.35)
         case .tripleSquare: productionMiniTriplePreview.scaleEffect(1.18)
         }
     }
@@ -1651,107 +1728,14 @@ struct ZestOnboardingView: View {
     }
 
     private func onboardingWelcomeZest(scale: CGFloat) -> some View {
-        let palette = onboardingAccentChoice.palette
-        let heroSize = 210 * scale
-
-        return ZStack {
-            // One production chassis and center are the permanent foundation.
-            // Every animated wedge below is already its exact canonical slot
-            // shape, so when its transform reaches identity there is literally
-            // no geometric hand-off or approximation.
-            ZestSliceAssemblyShell(
-                accentColor: palette.primary,
-                accentHighlightColor: palette.highlight,
-                accentDeepColor: palette.deep,
-                showInstalledGlass: false,
-                showsEmptySockets: false,
-                centerOpacity: 0,
-                centerGlowIntensity: 0
-            )
-            .frame(width: heroSize, height: heroSize)
-            .shadow(
-                color: .black.opacity(colorScheme == .dark ? 0.34 : 0.18),
-                radius: 18 * scale,
-                y: 9 * scale
-            )
-
-
-            ForEach(ZestSliceVisualSlot.all) { slot in
-                let i = slot.id
-                let angle = slot.centerAngle
-                let radians = angle * .pi / 180
-                let travel = 76.0 * scale
-                let colors = onboardingAccentChoice.displayColors
-                let pieceColor = colors[i % colors.count]
-
-                // This is the same physical production wedge renderer, now told
-                // which exact final slot it owns. Animation changes ONLY its
-                // transform away from that canonical final geometry.
-                ZestLiquidGlassWedgePiece(
-                    accentColor: pieceColor,
-                    accentHighlightColor: pieceColor,
-                    accentDeepColor: pieceColor,
-                    symbol: "circle",
-                    title: "",
-                    installed: true,
-                    labelCounterRotationDegrees: 0,
-                    usesLiveGlass: true,
-                    // Step 1 deliberately presents the glass geometry without
-                    // feature glyphs. Production/in-field renderers are unchanged.
-                    labelOpacity: 0,
-                    labelRevealScale: 1,
-                    visualSlotID: slot.id
-                )
-                .frame(width: heroSize, height: heroSize)
-                .rotationEffect(
-                    .degrees(
-                        assembled || reduceMotion
-                        ? 0
-                        : (i.isMultiple(of: 2) ? -7 : 7)
-                    )
-                )
-                .offset(
-                    x: assembled || reduceMotion ? 0 : cos(radians) * travel,
-                    y: assembled || reduceMotion ? 0 : sin(radians) * travel
-                )
-                .scaleEffect(assembled || reduceMotion ? 1 : 0.86)
-                .brightness(colorScheme == .dark ? 0.055 : 0)
-                .shadow(
-                    color: pieceColor.opacity(colorScheme == .dark ? 0.22 : 0.12),
-                    radius: assembled ? 4 * scale : 8 * scale
-                )
-                .animation(
-                    reduceMotion ? nil : ZestOnboardingMotion.heroSegment(index: i),
-                    value: assembled
-                )
-            }
-
-            // The production center is composited AFTER the six canonical wedges.
-            // This makes the wedges physically disappear underneath the center disc,
-            // exactly like the normal Orange Slice rather than sitting on top of it.
-            ZestSliceAssemblyShell(
-                accentColor: palette.primary,
-                accentHighlightColor: palette.highlight,
-                accentDeepColor: palette.deep,
-                showInstalledGlass: false,
-                showsEmptySockets: false,
-                centerOpacity: assembled || reduceMotion ? 1 : 0,
-                centerGlowIntensity: heroCenterPowered ? 1 : 0,
-                centerShineProgress: heroCenterShineProgress
-            )
-            .frame(width: heroSize, height: heroSize)
-            // Only retain the center region from this second production shell.
-            // The chassis remains owned by the foundation shell below the wedges.
-            .mask {
-                Circle()
-                    .frame(width: 96 * scale, height: 96 * scale)
-            }
-            .animation(
-                reduceMotion ? nil : ZestOnboardingMotion.heroCenterReveal,
-                value: assembled
-            )
-        }
-        .frame(width: heroSize, height: heroSize)
+        ZestWelcomeHeroAnimation(
+            accent: onboardingAccentChoice,
+            assembled: assembled,
+            centerPowered: heroCenterPowered,
+            centerShineProgress: heroCenterShineProgress,
+            reduceMotion: reduceMotion,
+            scale: scale
+        )
     }
 
     private func onboardingZest(scale: CGFloat) -> some View {
@@ -1765,7 +1749,7 @@ struct ZestOnboardingView: View {
     }
 }
 
-private struct ZestOnboardingSecondaryButton: ButtonStyle {
+struct ZestOnboardingSecondaryButton: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .bold))
@@ -1790,7 +1774,7 @@ private struct ZestOnboardingDestructiveButton: ButtonStyle {
     }
 }
 
-private struct ZestOnboardingPrimaryButton: ButtonStyle {
+struct ZestOnboardingPrimaryButton: ButtonStyle {
     let accent: Color
     func makeBody(configuration: Configuration) -> some View { configuration.label.font(.system(size: 12, weight: .bold)).foregroundStyle(.white).padding(.horizontal, 20).frame(height: 38).background(Capsule().fill(accent.opacity(configuration.isPressed ? 0.68 : 0.90))).scaleEffect(configuration.isPressed ? 0.97 : 1) }
 }

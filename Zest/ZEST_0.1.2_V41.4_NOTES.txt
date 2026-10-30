@@ -1,0 +1,14 @@
+Zest 0.1.2 v41.4 — Clock/Calendar Language-Switcher Workflow Fix
+
+- Removes the separate Clock/Calendar foreground hit-target workaround.
+- Restores one real SwiftUI Button for the right Clock/Calendar badge, matching the proven Language Turntable construction:
+  * 48x42 interaction box
+  * 40x29 visible rear glass badge
+  * +4 pt icon inset
+  * +10 pt side placement
+  * zIndex(-1)
+  * .buttonStyle(.plain)
+  * .focusable(false)
+- Runtime callback now mirrors Language Turntable order:
+  direction -> pushCenter -> staged rotation/fade -> midpoint face swap.
+- No visual changes to the Clock/Calendar face or any Nokia clock faces.

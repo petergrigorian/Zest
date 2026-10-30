@@ -14,6 +14,9 @@ extension Notification.Name {
 
     static let zestSettingsForceClose =
         Notification.Name("zest.settings.forceClose")
+
+    static let zestLayoutDragStateChanged =
+        Notification.Name("zest.settings.layoutDragStateChanged")
 }
 
 

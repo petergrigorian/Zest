@@ -44,9 +44,10 @@ final class ZestKeyboardAssistantController: NSObject {
 
     // Give runtime feature panels enough transparent window real estate to expand
     // without being clipped by the NSPanel boundary. The actual Zest control remains
-    // the original 620 × 360 canvas, centered inside this larger host.
+    // the same visual control, centered inside a larger transparent 1040 × 760
+    // SwiftUI stage so tall feature panels are never cropped by the host bounds.
     private let panelSize = NSSize(width: 1400, height: 1000)
-    private let runtimeCanvasSize = NSSize(width: 620, height: 360)
+    private let runtimeCanvasSize = NSSize(width: 1400, height: 1000)
     private let caretGap: CGFloat = 12
     private let visibleControlHalfSize: CGFloat = 105
     private var pendingCaretAnchor: NSRect?
@@ -150,10 +151,10 @@ final class ZestKeyboardAssistantController: NSObject {
         // consume the current mouse position: doing so made the purple diagnostic
         // look like a caret candidate even when the resolver had already rejected it.
         let rawIWorkPointer = (isIWork && !isPages) ? NSEvent.mouseLocation : nil
-        if let rawIWorkPointer {
+        if let rawIWorkPointer, settingsManager.showCaretIndicator {
             showRawPointerDebugMarker(at: rawIWorkPointer)
             print("🟣 IWORK RAW POINTER AT SUMMON:", NSStringFromPoint(rawIWorkPointer))
-        } else if isPages {
+        } else {
             rawPointerDebugPanel?.orderOut(nil)
         }
 
@@ -179,7 +180,11 @@ final class ZestKeyboardAssistantController: NSObject {
             anchor = currentCaretRect() ?? fallbackAnchorRect()
         }
         pendingCaretAnchor = anchor
-        showCaretDebugMarker(at: anchor)
+        if settingsManager.showCaretIndicator {
+            showCaretDebugMarker(at: anchor)
+        } else {
+            hideCaretDebugMarker()
+        }
 
         // Remember the editor before Zest takes foreground ownership. Runtime
         // panels are inspector-style: Zest may become key/frontmost for search,
@@ -187,12 +192,25 @@ final class ZestKeyboardAssistantController: NSObject {
         if let frontApp, !isZestApplication(frontApp) {
             previousApplication = frontApp
             ZestTextInserter.rememberExternalTarget(frontApp)
+
+            // Layout Fix is shortcut-first in 0.1.2. Summoning the ordinary
+            // Zest assistant must never copy or disturb the user's selection.
+            // Keep only a lightweight AX context snapshot for the optional manual
+            // Layout Fix tile; the global Layout Fix shortcut performs its own
+            // capture while the editor remains frontmost.
+            ZestKeyboardLayoutFixService.shared.captureExternalContext(from: frontApp)
         }
-        // The keyboard host now has deterministic geometry: the 620×360 runtime
-        // canvas is vertically centered inside a compact 620×500 panel. There is
-        // no giant transparent 1040×760 coordinate space and no second-pass SwiftUI
-        // correction. The panel is placed once from the caret and the known control
-        // center, which makes the caret → Zest relationship stable across apps.
+
+        presentAssistantPanel(panel, beside: anchor, isIWork: isIWork)
+    }
+
+    private func presentAssistantPanel(
+        _ panel: NSPanel,
+        beside anchor: NSRect,
+        isIWork: Bool
+    ) {
+        // The keyboard host has deterministic geometry. Placement is calculated
+        // only after any pre-summon Layout Fix selection capture has completed.
         let summonOrigin = origin(
             for: panelSize,
             beside: anchor,
@@ -202,11 +220,6 @@ final class ZestKeyboardAssistantController: NSObject {
         panel.setFrameOrigin(summonOrigin)
         panel.alphaValue = 0
 
-        // Character-Viewer style foreground ownership. Zest becomes the active,
-        // key inspector while it is visible so text fields receive normal keyboard
-        // input and Liquid Glass renders in its true active state. Clicking back
-        // into the editor activates that app again; the workspace observer below
-        // then fades Zest away.
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
 
@@ -214,6 +227,25 @@ final class ZestKeyboardAssistantController: NSObject {
             context.duration = 0.14
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
+        }
+    }
+
+    private func activeLayoutUsesLayoutFix() -> Bool {
+        if settingsManager.menuBarPinnedFeatures.contains(.layoutFix) {
+            return true
+        }
+
+        switch settingsManager.formFactor {
+        case .orangeSlice:
+            return settingsManager.sliceAssignments.values.contains(.layoutFix)
+        case .centerOnly:
+            return settingsManager.centerOnlyTwoFeatures.contains(.layoutFix)
+                || settingsManager.centerOnlyFourFeatures.contains(.layoutFix)
+                || settingsManager.centerOnlyThreeFeatures.contains(.layoutFix)
+        case .turntable:
+            return false
+        case .tripleSquare:
+            return settingsManager.tripleFeatures.contains(.layoutFix)
         }
     }
 
@@ -382,7 +414,7 @@ final class ZestKeyboardAssistantController: NSObject {
             // previous 250x196 host showed the full glass shape but could still shave
             // a few pixels off the shadow near a bezel.
             size = NSSize(width: 282, height: 224)
-        case .centerOnly:
+        case .centerOnly, .turntable:
             size = NSSize(width: 150, height: 150)
         }
 
@@ -549,7 +581,29 @@ final class ZestKeyboardAssistantController: NSObject {
         insideStageClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, let panel = self.panel, panel.isVisible else { return event }
             let screenPoint = NSEvent.mouseLocation
-            let controlHit = self.runtimeControlScreenFrame.insetBy(dx: -4, dy: -4).contains(screenPoint)
+
+            // Turntable controls deliberately extend their physical badges behind the
+            // main disk. The SwiftUI-reported bounds can briefly lag the non-activating
+            // NSPanel during summon/animation, which made a real badge click look like a
+            // click in the transparent stage and caused Zest to dismiss before the
+            // Button action could run. Give the complete Turntable hardware a stable
+            // AppKit-owned interaction envelope, derived from the panel position rather
+            // than asynchronous SwiftUI geometry. The visual control itself is centered
+            // in the runtime stage and then placed +120 pt on X in ContentView.
+            let turntableHit: Bool = {
+                guard self.settingsManager.runtimeFormFactor == .turntable else { return false }
+                let hardwareCenter = CGPoint(x: panel.frame.midX + 120, y: panel.frame.midY)
+                let hardwareEnvelope = CGRect(
+                    x: hardwareCenter.x - 170,
+                    y: hardwareCenter.y - 110,
+                    width: 340,
+                    height: 220
+                )
+                return hardwareEnvelope.contains(screenPoint)
+            }()
+
+            let controlHit = turntableHit
+                || self.runtimeControlScreenFrame.insetBy(dx: -4, dy: -4).contains(screenPoint)
             let popupHit = self.runtimePopupScreenFrame?.insetBy(dx: -4, dy: -4).contains(screenPoint) ?? false
             guard !controlHit && !popupHit else { return event }
 
@@ -1601,7 +1655,7 @@ private struct ZestRuntimeResetGhost: View {
                 orangeSliceGhost
             case .tripleSquare:
                 tripleSquareGhost
-            case .centerOnly:
+            case .centerOnly, .turntable:
                 centerOnlyGhost
             }
         }

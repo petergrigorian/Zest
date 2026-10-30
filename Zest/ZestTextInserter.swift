@@ -846,3 +846,120 @@ final class ZestTextInserter: ObservableObject {
                 .bundleIdentifier
     }
 }
+
+
+// MARK: - Lightweight Static Insertion
+
+extension ZestTextInserter {
+    /// Rapid Symbols and other one-shot background actions can insert into the
+    /// editor that summoned Zest without constructing a panel-specific inserter.
+    static func insertIntoRememberedTarget(_ text: String) {
+        guard !text.isEmpty,
+              let pid = rememberedExternalPID,
+              let application = NSRunningApplication(processIdentifier: pid),
+              !application.isTerminated
+        else {
+            print("🍊 STATIC INSERT → no remembered external target")
+            return
+        }
+
+        // Route 1: insert directly into the remembered editor's current
+        // selection/caret when Accessibility exposes a settable selected-text
+        // attribute. This avoids clipboard timing entirely for native controls.
+        let appElement = AXUIElementCreateApplication(pid)
+        var focusedValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            appElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+           let focusedValue {
+            let focused = unsafeBitCast(focusedValue, to: AXUIElement.self)
+            var settable: DarwinBoolean = false
+
+            if AXUIElementIsAttributeSettable(
+                focused,
+                kAXSelectedTextAttribute as CFString,
+                &settable
+            ) == .success,
+               settable.boolValue,
+               AXUIElementSetAttributeValue(
+                focused,
+                kAXSelectedTextAttribute as CFString,
+                text as CFTypeRef
+               ) == .success {
+                print("🍊 STATIC INSERT AX → \(text)")
+                return
+            }
+        }
+
+        // Route 2: clipboard + Command-V. Restore foreground ownership first
+        // and wait for the original app's responder chain before posting V.
+        let pasteboard = NSPasteboard.general
+        let snapshot: [[NSPasteboard.PasteboardType: Data]] =
+            (pasteboard.pasteboardItems ?? []).map { item in
+                var values: [NSPasteboard.PasteboardType: Data] = [:]
+                for type in item.types {
+                    if let data = item.data(forType: type) {
+                        values[type] = data
+                    }
+                }
+                return values
+            }
+
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        application.activate(options: [.activateIgnoringOtherApps])
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            guard let source = CGEventSource(stateID: .combinedSessionState),
+                  let down = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: 9,
+                    keyDown: true
+                  ),
+                  let up = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: 9,
+                    keyDown: false
+                  )
+            else {
+                restoreStaticPasteboard(snapshot)
+                return
+            }
+
+            down.flags = .maskCommand
+            up.flags = .maskCommand
+            down.postToPid(pid)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.018) {
+                up.postToPid(pid)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                    restoreStaticPasteboard(snapshot)
+                    print("🍊 STATIC INSERT PASTE → \(text)")
+                }
+            }
+        }
+    }
+
+    private static func restoreStaticPasteboard(
+        _ snapshot: [[NSPasteboard.PasteboardType: Data]]
+    ) {
+        let board = NSPasteboard.general
+        board.clearContents()
+
+        let restored = snapshot.map { values -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in values {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+
+        if !restored.isEmpty {
+            board.writeObjects(restored)
+        }
+    }
+}
